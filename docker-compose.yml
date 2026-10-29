@@ -1,0 +1,78 @@
+name: opsdesk_uifix
+
+# Local / single-VM deployment. For production on a cloud provider see DEPLOYMENT.md.
+x-app: &app
+  build: ./backend
+  env_file: .env
+  depends_on:
+    db: { condition: service_healthy }
+    redis: { condition: service_started }
+  restart: unless-stopped
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: opsdesk
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/sql/00_init_roles.sql:/docker-entrypoint-initdb.d/00_init_roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d opsdesk"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  mailpit:            # catches outbound email locally: http://localhost:8025
+    image: axllent/mailpit:latest
+    ports: ["${MAILPIT_PORT:-8025}:8025"]
+
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    restart: "no"
+
+  api:
+    <<: *app
+    command: ["api"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  beat:
+    <<: *app
+    command: ["beat"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  web:
+    build: .
+    environment:
+      API_URL: http://api:8001
+    ports: ["${WEB_PORT:-8080}:8080"]
+    depends_on: [api]
+    restart: unless-stopped
+
+  ngrok:              # public tunnel to the UI; opt-in: docker compose --profile tunnel up -d ngrok
+    profiles: ["tunnel"]
+    image: ngrok/ngrok:latest
+    command: ["http", "web:8080"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN in .env}
+    ports: ["${NGROK_INSPECT_PORT:-4040}:4040"]   # inspector and tunnel URL: http://localhost:4040
+    depends_on: [web]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
