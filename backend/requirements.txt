@@ -1,0 +1,27 @@
+# Web / API
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+python-multipart==0.0.32
+# Database
+SQLAlchemy==2.0.54
+alembic==1.20.0
+psycopg[binary]==3.3.5
+psycopg-pool==3.3.3
+pgvector==0.5.0
+# Jobs and cache
+celery==5.6.3
+redis==8.1.0
+# Security
+PyJWT==2.14.0
+cryptography==50.0.1
+PyOTP==2.10.0
+# Integrations
+requests==2.34.2
+boto3==1.43.118
+# CLI
+typer==0.27.3
+# Tests
+pytest==9.1.1
+httpx==0.28.1
