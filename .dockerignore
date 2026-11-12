@@ -1,6 +1,28 @@
+# The web image only needs package*.json, index.html, vite.config.js, src/, public/ and nginx.conf.
 node_modules/
 dist/
 backend/
+deploy/
+coverage/
+.vite/
+
+# Version control and Docker files
+.git
+.gitignore
+.dockerignore
+Dockerfile*
+docker-compose*.yml
+
+# Local environment files and secrets
 .env
+.env.*
+
+# Docs, database dumps and other local files
 *.md
-docker-compose.yml
+*.docx
+*.dump
+*.sql
+*.log
+.claude/
+.vscode/
+.idea/
