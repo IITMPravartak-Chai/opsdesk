@@ -272,6 +272,14 @@ class TestProfile:
         assert customer["teams"] is None and customer["agents"] is None and [a["code"] for a in customer["accounts"]] == ["GLBX"]
         assert {t["key"] for t in customer["ticket_types"]} == {"incident", "service_request"}  # customer_can_create only
 
+    def test_meta_reports_upload_limits_to_every_role(self, api, world):
+        """The UI refuses an oversized or blocked file before submitting, using the limits the server enforces."""
+        from opsdesk.settings import settings
+        for role in ("employee", "customer"):
+            limits = api.get("/api/meta/", headers=login(api, world, role)).json()["attachment_limits"]
+            assert limits["max_file_mb"] == settings.attachment_max_mb and limits["max_request_mb"] == 25
+            assert ".exe" in limits["blocked_extensions"]
+
 
 class TestLoginThrottle:
     def test_account_limit_returns_429_with_retry_after(self, api, world):

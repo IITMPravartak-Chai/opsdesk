@@ -4,9 +4,10 @@ import { useApp } from "../App.jsx";
 import SafeMarkdown from "./SafeMarkdown.js";
 import { cx } from "../util.js";
 import { inFlightGuard } from "../pages/workflowHelpers.js";
+import { fileProblems, limitsFrom, uploadErrorMessage } from "../pages/attachmentHelpers.js";
 
 export default function Composer({ t, onSent }) {
-  const { user } = useApp();
+  const { user, meta } = useApp();
   const [body, setBody] = useState("");
   const [kind, setKind] = useState("public");
   const [tab, setTab] = useState("write"); // 'write' or 'preview'
@@ -15,6 +16,8 @@ export default function Composer({ t, onSent }) {
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
+  const limits = limitsFrom(meta);
+  const fileErrors = fileProblems(files, limits);
   const textareaRef = useRef(null);
   // The Send button is disabled while sending, but Ctrl/Cmd+Enter calls send() directly;
   // this guard stops a second (or key-repeat) submission while the first is in flight.
@@ -78,6 +81,10 @@ export default function Composer({ t, onSent }) {
       setErr("Write a message or attach a file.");
       return;
     }
+    if (fileErrors.length) {
+      setErr(fileErrors.join(" "));
+      return;
+    }
     if (!sendGuard.current.enter()) return;
     setBusy("send");
     setErr("");
@@ -93,7 +100,7 @@ export default function Composer({ t, onSent }) {
       setTab("write");
       await onSent?.();
     } catch (e) {
-      setErr(e.message);
+      setErr(files.length ? uploadErrorMessage(e, limits) : e.message);
     } finally {
       sendGuard.current.exit();
       setBusy("");
@@ -288,10 +295,21 @@ export default function Composer({ t, onSent }) {
           type="file"
           multiple
           hidden
-          onChange={(e) => setFiles([...e.target.files])}
+          onChange={(e) => {
+            const picked = [...e.target.files];
+            setFiles(picked);
+            setErr(fileProblems(picked, limits).join(" "));
+            e.target.value = ""; // so the same file can be picked again after it was removed
+          }}
         />
 
         <span className="spacer" />
+
+        {files.length > 0 && (
+          <button type="button" className="btn ghost sm" onClick={() => { setFiles([]); setErr(""); }}>
+            Remove files
+          </button>
+        )}
 
         {err && <span className="error" role="alert" style={{ fontSize: 12 }}>{err}</span>}
 
@@ -299,7 +317,7 @@ export default function Composer({ t, onSent }) {
           type="button"
           className="btn primary sm"
           onClick={send}
-          disabled={busy === "send"}
+          disabled={busy === "send" || fileErrors.length > 0}
         >
           {busy === "send"
             ? "Sending..."

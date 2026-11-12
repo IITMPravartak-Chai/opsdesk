@@ -18,6 +18,7 @@ from ...db.session import plain_session, tenant_session
 from ...security import email_otp, login_throttle, passwords, tokens
 from ...services.audit import audit
 from ...settings import settings
+from ..multipart_helper import MAX_UPLOAD_SIZE
 from ..runtime import run_in_tenant
 from ..schemas.core import (AccountMeta, CategoryMeta, CIMeta, CustomFieldMeta, LabelValue, LoginRequest,
                             LoginResponse, MetaResponse, MfaSetupResponse, PriorityMeta, RefreshTokenRequest,
@@ -309,6 +310,9 @@ async def get_meta(user: AuthenticatedUser = Depends(get_authenticated_user)):
             accounts=accounts_meta, services=services_meta, cis=cis_meta,
             impact=[LabelValue(value=k, label=v) for k, v in IMPACT_LABELS.items()],
             urgency=[LabelValue(value=k, label=v) for k, v in URGENCY_LABELS.items()],
-            teams=teams_meta, agents=agents_meta, states=states_meta)
+            teams=teams_meta, agents=agents_meta, states=states_meta,
+            attachment_limits={"max_file_mb": settings.attachment_max_mb,
+                               "max_request_mb": MAX_UPLOAD_SIZE // (1024 * 1024),
+                               "blocked_extensions": sorted(settings.attachment_blocked_extensions)})
 
     return await run_in_tenant(user, _do, commit=False)
