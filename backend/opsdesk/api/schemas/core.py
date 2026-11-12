@@ -116,3 +116,5 @@ class MetaResponse(BaseModel):
     teams: Optional[List[Dict[str, Any]]] = None
     agents: Optional[List[Dict[str, Any]]] = None
     states: Optional[List[Dict[str, Any]]] = None
+    # Upload limits, so the UI can refuse an oversized or blocked file before anything is submitted.
+    attachment_limits: Optional[Dict[str, Any]] = None

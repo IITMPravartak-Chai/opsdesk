@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { useApp } from "../App.jsx";
+import { fileProblems, limitsFrom, uploadErrorMessage } from "./attachmentHelpers.js";
 
 export default function NewTicket() {
   const { user, meta, navigate, refreshCounts } = useApp();
@@ -12,6 +13,10 @@ export default function NewTicket() {
   const [errors, setErrors] = useState({});
   const [busy, setBusy] = useState(false);
   const [hints, setHints] = useState({ tickets: [], articles: [] });
+  // Set when the ticket was saved but its files were not: { ticket, message }.
+  const [uploadIssue, setUploadIssue] = useState(null);
+  const limits = limitsFrom(meta);
+  const fileErrors = fileProblems(files, limits);
 
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
   const accountId = user.is_agent ? Number(f.account) || null : user.account?.id;
@@ -31,7 +36,7 @@ export default function NewTicket() {
     if (!f.subject.trim()) errs.subject = "Add a short summary of the problem or request.";
     (type?.custom_fields || []).forEach((d) => { if (d.required && !custom[d.key]) errs[d.key] = `${d.label} is required.`; });
     setErrors(errs);
-    if (Object.keys(errs).length) return;
+    if (Object.keys(errs).length || fileErrors.length) return;
     setBusy(true);
     const body = { ticket_type: type.id, subject: f.subject.trim(), description: f.description, custom_fields: custom,
       source: window.matchMedia("(max-width: 820px)").matches ? "mobile" : "portal" };
@@ -41,7 +46,20 @@ export default function NewTicket() {
       if (files.length) {
         const form = new FormData();
         files.forEach((x) => form.append("files", x));
-        await api(`/tickets/${t.id}/attachments/`, { method: "POST", form }).catch(() => {});
+        // The ticket exists by now, so a refused upload is reported here instead of being dropped silently.
+        let problem = "";
+        try {
+          const r = await api(`/tickets/${t.id}/attachments/`, { method: "POST", form });
+          if (r?.errors?.length) problem = r.errors.join("; ");
+        } catch (upErr) {
+          problem = uploadErrorMessage(upErr, limits);
+        }
+        if (problem) {
+          refreshCounts();
+          setUploadIssue({ ticket: t, message: problem });
+          setBusy(false);
+          return;
+        }
       }
       refreshCounts();
       navigate(`/tickets/${t.id}`);
@@ -50,6 +68,19 @@ export default function NewTicket() {
       setBusy(false);
     }
   };
+
+  if (uploadIssue) {
+    return (
+      <div className="page">
+        <div className="page-head"><h1>{uploadIssue.ticket.number} was created</h1></div>
+        <div className="card card-b stack" role="alert">
+          <div className="error">Not every attachment was saved. {uploadIssue.message}</div>
+          <p style={{ margin: 0 }}>Your {user.is_agent ? "ticket" : "request"} itself was submitted. Open it and attach the files again from the reply box.</p>
+          <div className="row"><button type="button" className="btn primary" onClick={() => navigate(`/tickets/${uploadIssue.ticket.id}`)}>Open {uploadIssue.ticket.number}</button></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page">
@@ -134,12 +165,14 @@ export default function NewTicket() {
             </div>
           )}
           <label className="field"><span>Attachments (optional)</span>
-            <input type="file" multiple onChange={(e) => setFiles([...e.target.files])} />
+            <input type="file" multiple onChange={(e) => setFiles([...e.target.files])} aria-invalid={fileErrors.length > 0} />
+            <span className="hint">Up to {limits.max_file_mb} MB per file.</span>
+            {fileErrors.map((m) => <span key={m} className="error" role="alert">{m}</span>)}
           </label>
           {Object.entries(errors).filter(([k]) => !["subject", ...(type?.custom_fields || []).map((d) => d.key)].includes(k)).map(([k, v]) => (
             <div key={k} className="error">{v}</div>
           ))}
-          <div className="row"><button className="btn primary" disabled={busy}>{busy ? "Submitting..." : user.is_agent ? "Create ticket" : "Submit request"}</button>
+          <div className="row"><button className="btn primary" disabled={busy || fileErrors.length > 0}>{busy ? "Submitting..." : user.is_agent ? "Create ticket" : "Submit request"}</button>
             <button type="button" className="btn ghost" onClick={() => history.back()}>Cancel</button></div>
         </form>
 
