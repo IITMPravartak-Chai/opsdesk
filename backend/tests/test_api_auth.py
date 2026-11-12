@@ -1,5 +1,4 @@
-"""Sign-in, tokens, MFA, role re-validation and rate limiting through the HTTP API."""
-import pyotp
+"""Sign-in, tokens, two-step sign-in by emailed code, role re-validation and rate limiting through the HTTP API."""
 import pytest
 from sqlalchemy import select
 
@@ -58,31 +57,134 @@ class TestLogin:
             assert passwords.check_password(World.PASSWORD, s.get(User, world.users["employee"]).password)
 
 
+def wrong(code):
+    """A 6-digit code that is certainly not `code`."""
+    return f"{(int(code) + 1) % 10 ** 6:06d}"
+
+
+def enable_two_step(api, w, box, role="employee"):
+    """Turn on two-step sign-in for the role's user through the API, with the code mailed to them."""
+    h = login(api, w, role)
+    r = api.post("/api/auth/mfa/", headers=h, json={})
+    assert r.status_code == 200 and r.json()["mfa_enabled"] is False and r.json()["sent_to"].endswith("@" + w.email(role).split("@")[1])
+    r = api.post("/api/auth/mfa/", headers=h, json={"code": box.last(w.email(role))})
+    assert r.status_code == 200 and r.json()["mfa_enabled"] is True
+    return h
+
+
+def login_with_code(api, w, box, role="employee"):
+    r = post_login(api, w.email(role), World.PASSWORD)
+    assert r.status_code == 401 and r.json()["mfa_required"] is True and r.json()["otp_sent"] is True
+    r = post_login(api, w.email(role), World.PASSWORD, otp=box.last(w.email(role)))
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access']}"}
+
+
 class TestMfa:
-    def _enable(self, api, w, role="employee"):
-        h = login(api, w, role)
-        secret = api.post("/api/auth/mfa/", headers=h, json={}).json()["secret"]
-        r = api.post("/api/auth/mfa/", headers=h, json={"code": pyotp.TOTP(secret).now()})
-        assert r.json() == {"mfa_enabled": True, "otpauth_uri": None, "secret": None} or r.json().get("mfa_enabled") is True
-        return secret
+    def test_turning_it_on_then_login_requires_the_emailed_code(self, api, world, emailed_codes):
+        email = world.email("employee")
+        enable_two_step(api, world, emailed_codes)
+        before = len(emailed_codes.sent)
+        r = post_login(api, email, World.PASSWORD)
+        assert r.status_code == 401 and r.json()["mfa_required"] is True and r.json()["otp_sent"] is True
+        assert len(emailed_codes.sent) == before + 1 and emailed_codes.sent[-1][0] == email
+        assert email not in r.json()["detail"] and email[0] + "***@" in r.json()["detail"]   # masked address only
+        code = emailed_codes.last(email)
+        bad = post_login(api, email, World.PASSWORD, otp=wrong(code))
+        assert bad.status_code == 401 and bad.json()["mfa_required"] is True and "otp_sent" not in bad.json()
+        assert post_login(api, email, "wrong-password-here", otp=code).status_code == 401   # the code never replaces the password
+        ok = post_login(api, email, World.PASSWORD, otp=code)
+        assert ok.status_code == 200 and ok.json()["user"]["mfa_enabled"] is True
+        assert post_login(api, email, World.PASSWORD, otp=code).status_code == 401        # a code works once
 
-    def test_enrolment_then_login_requires_the_code(self, api, world):
-        secret = self._enable(api, world)
-        r = post_login(api, world.email("employee"), World.PASSWORD)
-        assert r.status_code == 401 and r.json()["mfa_required"] is True
-        bad = post_login(api, world.email("employee"), World.PASSWORD, otp="000000")
-        assert bad.status_code == 401 and bad.json()["mfa_required"] is True
-        ok = post_login(api, world.email("employee"), World.PASSWORD, otp=pyotp.TOTP(secret).now())
-        assert ok.status_code == 200
+    def test_a_second_request_within_the_cooldown_sends_no_new_mail(self, api, world, emailed_codes):
+        email = world.email("employee")
+        enable_two_step(api, world, emailed_codes)
+        assert post_login(api, email, World.PASSWORD).status_code == 401
+        sent, code = len(emailed_codes.sent), emailed_codes.last(email)
+        again = post_login(api, email, World.PASSWORD)
+        assert again.status_code == 401 and again.json()["mfa_required"] is True and "already sent" in again.json()["detail"]
+        assert len(emailed_codes.sent) == sent
+        assert post_login(api, email, World.PASSWORD, otp=code).status_code == 200            # the first code still works
 
-    def test_wrong_code_enrolment_is_refused_and_reenrolment_while_on_is_blocked(self, api, world):
+    def test_users_without_two_step_get_no_mail_and_no_prompt(self, api, world, emailed_codes):
+        assert post_login(api, world.email("employee"), World.PASSWORD).status_code == 200
+        assert post_login(api, world.email("employee"), "wrong-password-here").status_code == 401
+        assert emailed_codes.sent == []
+
+    def test_wrong_password_never_sends_a_code(self, api, world, emailed_codes):
+        enable_two_step(api, world, emailed_codes)
+        sent = len(emailed_codes.sent)
+        r = post_login(api, world.email("employee"), "wrong-password-here")
+        assert r.status_code == 401 and "mfa_required" not in r.json() and len(emailed_codes.sent) == sent
+
+    def test_mail_failure_is_reported_and_a_new_code_can_be_requested_at_once(self, api, world, emailed_codes, monkeypatch):
+        from opsdesk.services import mailer
+        email = world.email("employee")
+        enable_two_step(api, world, emailed_codes)
+        working = mailer.send_mail
+
+        def broken(*a, **kw):
+            raise OSError("mail server down")
+        monkeypatch.setattr(mailer, "send_mail", broken)
+        r = post_login(api, email, World.PASSWORD)
+        assert r.status_code == 503 and "couldn't send the code" in r.json()["detail"]
+        monkeypatch.setattr(mailer, "send_mail", working)
+        assert login_with_code(api, world, emailed_codes)
+
+    def test_wrong_code_is_refused_and_turning_on_twice_is_blocked(self, api, world, emailed_codes):
         h = login(api, world, "team_lead")
         api.post("/api/auth/mfa/", headers=h, json={})
-        assert api.post("/api/auth/mfa/", headers=h, json={"code": "123456"}).status_code == 400
-        secret = self._enable(api, world, "manager")
-        assert api.post("/api/auth/mfa/", headers=login(api, world, "manager") if False else {}, json={}).status_code == 401
-        h2 = {"Authorization": "Bearer " + post_login(api, world.email("manager"), World.PASSWORD, otp=pyotp.TOTP(secret).now()).json()["access"]}
+        assert api.post("/api/auth/mfa/", headers=h, json={"code": wrong(emailed_codes.last(world.email("team_lead")))}).status_code == 400
+        assert api.get("/api/auth/me/", headers=h).json()["mfa_enabled"] is False
+        assert api.post("/api/auth/mfa/", headers={}, json={}).status_code == 401
+        h2 = enable_two_step(api, world, emailed_codes, "manager")
         assert api.post("/api/auth/mfa/", headers=h2, json={}).status_code == 409
+
+    def test_a_code_for_one_purpose_or_person_does_not_work_for_another(self, api, world, emailed_codes):
+        he = enable_two_step(api, world, emailed_codes, "employee")
+        hm = login(api, world, "manager")
+        api.post("/api/auth/mfa/", headers=hm, json={})
+        manager_code = emailed_codes.last(world.email("manager"))
+        assert api.post("/api/auth/mfa/disable/", headers=he, json={}).status_code == 200
+        employee_off_code = emailed_codes.last(world.email("employee"))
+        if manager_code != employee_off_code:  # equal only by a one-in-a-million draw
+            assert api.post("/api/auth/mfa/disable/", headers=he, json={"code": manager_code}).status_code == 400
+        post_login(api, world.email("employee"), World.PASSWORD)
+        login_code = emailed_codes.last(world.email("employee"))
+        if login_code != employee_off_code:
+            assert post_login(api, world.email("employee"), World.PASSWORD, otp=employee_off_code).status_code == 401
+
+    def test_turning_it_off_needs_the_emailed_code_and_is_audited(self, api, world, emailed_codes):
+        email = world.email("employee")
+        h = enable_two_step(api, world, emailed_codes)
+        r = api.post("/api/auth/mfa/disable/", headers=h, json={})
+        assert r.status_code == 200 and r.json()["mfa_enabled"] is True and r.json()["sent_to"]
+        code = emailed_codes.last(email)
+        assert api.post("/api/auth/mfa/disable/", headers=h, json={"code": wrong(code)}).status_code == 400
+        assert api.get("/api/auth/me/", headers=h).json()["mfa_enabled"] is True
+        assert api.post("/api/auth/mfa/disable/", headers=h, json={"code": code}).json()["mfa_enabled"] is False
+        assert api.post("/api/auth/mfa/disable/", headers=h, json={}).status_code == 409
+        assert post_login(api, email, World.PASSWORD).status_code == 200
+        with tenant_session(world.tenant_id) as s:
+            actions = set(s.scalars(select(AuditLog.action).where(AuditLog.action.like("auth.mfa_%"))))
+            assert actions == {"auth.mfa_enabled", "auth.mfa_disabled"}
+            assert all(code not in str(c) for c in s.scalars(select(AuditLog.changes)))
+
+    def test_accounts_set_up_with_an_authenticator_app_now_get_emailed_codes(self, api, world, emailed_codes):
+        with tenant_session(world.tenant_id) as s:
+            u = s.get(User, world.users["employee"])
+            u.mfa_enabled, u.mfa_secret = True, "JBSWY3DPEHPK3PXP"
+        assert login_with_code(api, world, emailed_codes)
+
+    def test_too_many_wrong_codes_drop_the_code(self, api, world, emailed_codes):
+        email = world.email("employee")
+        enable_two_step(api, world, emailed_codes)
+        post_login(api, email, World.PASSWORD)
+        code = emailed_codes.last(email)
+        for _ in range(5):
+            assert post_login(api, email, World.PASSWORD, otp=wrong(code)).status_code == 401
+        assert post_login(api, email, World.PASSWORD, otp=code).status_code == 401
 
 
 class TestRefreshAndRevalidation:

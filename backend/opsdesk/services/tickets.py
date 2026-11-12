@@ -161,6 +161,9 @@ def create_ticket(session: Session, *, tenant_id, ticket_type, subject, descript
         notifications.notify_assignment(session, t, actor=created_by)
     else:
         auto_assign(session, t)
+        notifications.notify_unassigned(session, t, actor=created_by)  # no-op once someone is assigned
+    if t.is_major_incident:
+        notifications.notify_major_incident(session, t, actor=created_by)
     _enqueue_ai(session, t)
     # robust: the ticket is already committed when this runs; a failing notification is logged instead of
     # surfacing as an error that invites the user to submit it again.
@@ -209,9 +212,13 @@ def update_ticket(session: Session, ticket, user, data: dict, request=None):
     log_event(session, ticket, "updated", user, changes=changes)
     audit(session, ticket.tenant_id, "ticket.update", ticket, user, changes, request)
     if "assignee" in changes and ticket.assignee_id:
-        notifications.notify_assignment(session, ticket)
+        notifications.notify_assignment(session, ticket, actor=user)
     if "team" in changes and not ticket.assignee_id:
         auto_assign(session, ticket)
+    if {"team", "assignee"} & changes.keys():
+        notifications.notify_unassigned(session, ticket, actor=user)  # no-op once someone is assigned
+    if "is_major_incident" in changes and ticket.is_major_incident:
+        notifications.notify_major_incident(session, ticket, actor=user)
     if "team" in changes and old_team is not None and ticket.team is not None and old_team.id != ticket.team.id:
         notifications.notify_team_transfer(session, ticket, old_team, ticket.team)
     emit(session, ticket, "ticket.updated", actor=user, changes=changes)
@@ -230,11 +237,11 @@ def set_state(session: Session, ticket, new_state, actor=None, via=None):
     log_event(session, ticket, "state_changed", actor, **{"from": old.name, "to": new_state.name, "via": via or ""})
     emit(session, ticket, "ticket.state_changed", actor=actor, changes={"state": [old.key, new_state.key]})
     if new_state.category == "resolved" and old.category != "resolved":
-        _on_resolved(session, ticket)
+        _on_resolved(session, ticket, actor)
     return ticket
 
 
-def _on_resolved(session: Session, ticket) -> None:
+def _on_resolved(session: Session, ticket, actor=None) -> None:
     csat_on = ticket.tenant.setting("csat_enabled", True)
     survey = None
     if csat_on and ticket.requester_id and ticket.csat is None:
@@ -242,12 +249,14 @@ def _on_resolved(session: Session, ticket) -> None:
         session.add(survey)
         session.flush()
     survey_token = survey.token if survey else None
+    actor_id = getattr(actor, "id", None)
     # Runs only if the resolution commits, in the ticket's own tenant; a notification failure never fails the
     # committed transition.
     commit_hooks.on_commit(session, _in_new_tenant_session(
         ticket.tenant_id, ticket.id,
-        lambda s, t: notifications.notify_resolved(s, t, s.scalars(select(CSATSurvey).where(
-            CSATSurvey.token == survey_token)).first() if survey_token else None)), robust=True)
+        lambda s, t: notifications.notify_resolved(
+            s, t, s.scalars(select(CSATSurvey).where(CSATSurvey.token == survey_token)).first() if survey_token else None,
+            actor=s.get(User, actor_id) if actor_id else None)), robust=True)
 
 
 def perform_transition(session: Session, ticket, transition, user, comment="", fields=None, comment_public=None):
@@ -289,6 +298,7 @@ def add_interaction(session: Session, ticket, *, body, author=None, kind="public
         session.flush()
         log_event(session, ticket, "first_response", author)
     log_event(session, ticket, "interaction", author, kind=kind, direction=direction, interaction_id=it.id)
+    notifications.notify_interaction(session, ticket, it, author)
     if direction == "inbound" and kind == "public":
         wf = ticket.state.workflow
         if reopen and wf.customer_reply_state_id and ticket.state.category in ("pending", "resolved"):
@@ -449,6 +459,7 @@ def create_service_request_from_catalog(session: Session, catalog_item, employee
         if approval_state:
             set_state(session, ticket, approval_state, actor=employee, via="Send for approval")
 
+        notifications.notify_approval_requested(session, ticket, approver, actor=employee)
         if approver.email:
             notifications.send(
                 session, [approver.email], f"[{ticket.number}] Approval requested: {ticket.subject}",

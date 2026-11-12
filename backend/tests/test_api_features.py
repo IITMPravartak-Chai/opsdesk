@@ -241,6 +241,146 @@ class TestNotifications:
         kinds = [n["event_type"] for n in api.get("/api/notifications/", headers=auth("customer")).json()["results"]]
         assert "resolved" in kinds
 
+    # ---- who hears about what: (event_type, title) pairs in the caller's list, newest first
+    @staticmethod
+    def _seen(api, h):
+        return [(n["event_type"], n["title"]) for n in api.get("/api/notifications/", headers=h).json()["results"]]
+
+    @staticmethod
+    def _post(api, h, t, body, kind="public"):
+        r = api.post(f"/api/tickets/{t['id']}/interactions/", headers=h, files=[("body", (None, body)), ("kind", (None, kind))])
+        assert r.status_code == 201, r.text
+
+    def _lead_ticket(self, api, world, auth):
+        """A customer's ticket assigned to the team lead by the manager, with the assignment alert already read."""
+        t = create_ticket_api(api, auth("customer"), "Lead works this")
+        assert api.patch(f"/api/tickets/{t['id']}/", headers=auth("manager"), json={"assignee": world.users["team_lead"]}).status_code == 200
+        assert self._seen(api, auth("team_lead")) == [("assigned", f"Ticket {t['number']} assigned to you")]
+        return t
+
+    def test_assigning_a_ticket_to_yourself_does_not_notify_you(self, api, world, auth):
+        t = create_ticket_api(api, auth("customer"), "Mine")
+        assert api.patch(f"/api/tickets/{t['id']}/", headers=auth("team_lead"), json={"assignee": world.users["team_lead"]}).status_code == 200
+        assert self._seen(api, auth("team_lead")) == []
+
+    def test_requester_reply_notifies_the_assignee_only(self, api, world, auth):
+        t = self._lead_ticket(api, world, auth)
+        self._post(api, auth("customer"), t, "Any update?")
+        assert self._seen(api, auth("team_lead"))[0] == ("reply", f"New reply on {t['number']}")
+        assert self._seen(api, auth("customer")) == []  # not notified of their own message
+
+    def test_internal_note_notifies_the_assignee_and_never_the_requester(self, api, world, auth):
+        t = self._lead_ticket(api, world, auth)
+        self._post(api, auth("manager"), t, "Check the logs", kind="internal")
+        assert self._seen(api, auth("team_lead"))[0] == ("reply", f"Internal note on {t['number']}")
+        assert self._seen(api, auth("customer")) == []
+        self._post(api, auth("team_lead"), t, "My own note", kind="internal")
+        assert len(self._seen(api, auth("team_lead"))) == 2  # assignment + the manager's note; not their own
+
+    def test_staff_reply_notifies_assignee_and_requester_but_not_its_author(self, api, world, auth):
+        t = self._lead_ticket(api, world, auth)
+        reply = ("reply", f"New reply on {t['number']}")
+        self._post(api, auth("manager"), t, "Looking into it")  # a third staff member
+        assert self._seen(api, auth("team_lead"))[0] == reply and self._seen(api, auth("customer")) == [reply]
+        assert self._seen(api, auth("manager")) == []
+        self._post(api, auth("team_lead"), t, "Fixed soon")  # the assignee
+        assert self._seen(api, auth("customer")) == [reply, reply]
+        assert len(self._seen(api, auth("team_lead"))) == 2  # unchanged: assignment + the manager's reply
+
+    def test_reply_alerts_respect_the_replies_preference(self, api, world, auth):
+        t = self._lead_ticket(api, world, auth)
+        api.patch("/api/notifications/preferences/", headers=auth("team_lead"), json={"notify_on_replies": False})
+        self._post(api, auth("customer"), t, "Hello?")
+        assert len(self._seen(api, auth("team_lead"))) == 1  # only the earlier assignment
+
+    def test_resolving_your_own_request_does_not_notify_you(self, api, world, auth):
+        h = auth("team_lead")
+        t = create_ticket_api(api, auth("manager"), "Lead asked for this", requester=world.users["team_lead"])
+        resolve(api, h, t)
+        assert self._seen(api, h) == []
+        t2 = create_ticket_api(api, auth("manager"), "Lead asked for this too", requester=world.users["team_lead"])
+        resolve(api, auth("manager"), t2)
+        assert self._seen(api, h) == [("resolved", f"Ticket {t2['number']} resolved")]
+
+    def test_sla_breach_notifies_the_assignee(self, api, world, auth):
+        from datetime import timedelta
+
+        from opsdesk.worker.tasks import sla_monitor, utcnow
+        t = self._lead_ticket(api, world, auth)
+        with tenant_session(world.tenant_id) as s:
+            s.get(Ticket, t["id"]).resolution_due_at = utcnow() - timedelta(hours=1)
+        sla_monitor()
+        assert self._seen(api, auth("team_lead"))[0] == ("sla_breached", f"SLA breached: {t['number']}")
+
+    # ---- supervisory alerts: the team's lead and manager, major incidents, approvals
+    @staticmethod
+    def _team(world, **kw):
+        """A manual-assignment team; returns its id."""
+        from opsdesk.db.models import Team
+        with tenant_session(world.tenant_id) as s:
+            team = Team(tenant_id=world.tenant_id, name="Network", assignment_strategy="manual", **kw)
+            s.add(team)
+            s.flush()
+            return team.id
+
+    def test_unassigned_ticket_in_a_team_notifies_its_lead_and_manager(self, api, world, auth):
+        team = self._team(world, team_lead_id=world.users["team_lead"], manager_id=world.users["manager"])
+        t = create_ticket_api(api, auth("customer"), "Router down")
+        assert api.patch(f"/api/tickets/{t['id']}/", headers=auth("manager"), json={"team": team}).status_code == 200
+        alert = ("unassigned", f"Unassigned ticket {t['number']} in Network")
+        assert self._seen(api, auth("team_lead")) == [alert]
+        assert self._seen(api, auth("manager")) == []  # the manager moved it there: their own action
+        # assigning it, then removing the assignee, raises the alert again for both (the lead removed it)
+        api.patch(f"/api/tickets/{t['id']}/", headers=auth("manager"), json={"assignee": world.users["employee"]})
+        assert api.patch(f"/api/tickets/{t['id']}/", headers=auth("team_lead"), json={"assignee": None}).status_code == 200
+        assert self._seen(api, auth("manager")) == [alert] and self._seen(api, auth("team_lead")) == [alert]
+
+    def test_lead_role_members_supervise_a_team_without_named_supervisors(self, api, world, auth):
+        from opsdesk.db.models import Team
+        team = self._team(world)
+        with tenant_session(world.tenant_id) as s:
+            row = s.get(Team, team)
+            row.members.extend([s.get(User, world.users["team_lead"]), s.get(User, world.users["employee"])])
+        t = create_ticket_api(api, auth("customer"), "Switch down")
+        api.patch(f"/api/tickets/{t['id']}/", headers=auth("manager"), json={"team": team})
+        assert self._seen(api, auth("team_lead")) == [("unassigned", f"Unassigned ticket {t['number']} in Network")]
+        assert self._seen(api, auth("employee")) == []
+
+    def test_sla_breach_on_a_teammates_ticket_notifies_the_team_supervisors(self, api, world, auth):
+        from datetime import timedelta
+
+        from opsdesk.worker.tasks import sla_monitor, utcnow
+        team = self._team(world, team_lead_id=world.users["team_lead"], manager_id=world.users["manager"])
+        t = create_ticket_api(api, auth("customer"), "Slow")
+        api.patch(f"/api/tickets/{t['id']}/", headers=auth("manager"), json={"team": team, "assignee": world.users["employee"]})
+        with tenant_session(world.tenant_id) as s:
+            s.get(Ticket, t["id"]).resolution_due_at = utcnow() - timedelta(hours=1)
+        sla_monitor()
+        breach = ("sla_breached", f"SLA breached: {t['number']}")
+        for role in ("employee", "team_lead", "manager"):
+            assert self._seen(api, auth(role)).count(breach) == 1, role
+
+    def test_major_incident_notifies_every_lead_and_manager_but_not_who_declared_it(self, api, world, auth):
+        t = assign_to_employee(api, world, auth, create_ticket_api(api, auth("customer"), "Site down"))
+        r = api.post(f"/api/tickets/{t['id']}/designate_major/", headers=auth("team_lead"), json={"is_major_incident": True})
+        assert r.status_code == 200, r.text
+        major = ("major_incident", f"Major incident declared: {t['number']}")
+        assert major in self._seen(api, auth("manager")) and major in self._seen(api, auth("employee"))
+        assert major not in self._seen(api, auth("team_lead")) and self._seen(api, auth("customer")) == []
+        api.post(f"/api/tickets/{t['id']}/designate_major/", headers=auth("team_lead"), json={"is_major_incident": True})
+        assert self._seen(api, auth("manager")).count(major) == 1  # already major: no second alert
+
+    def test_approval_request_and_decision_are_notified_in_app(self, api, world, auth):
+        t = assign_to_employee(api, world, auth, create_ticket_api(api, auth("customer"), "Need a laptop"))
+        r = api.post(f"/api/tickets/{t['id']}/approvals/", headers=auth("employee"), json={"approver_id": world.users["manager"]})
+        assert r.status_code == 201, r.text
+        assert ("approval_requested", f"Approval requested on {t['number']}") in self._seen(api, auth("manager"))
+        r = api.post(f"/api/tickets/{t['id']}/approvals/{r.json()['id']}/decide/", headers=auth("manager"), json={"decision": "approved", "comment": "ok"})
+        assert r.status_code == 200, r.text
+        granted = ("approval_granted", f"Approval granted on {t['number']}")
+        assert granted in self._seen(api, auth("employee")) and granted in self._seen(api, auth("customer"))
+        assert granted not in self._seen(api, auth("manager"))
+
 
 class TestReports:
     def test_overview_numbers(self, api, world, auth):

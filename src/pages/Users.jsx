@@ -89,17 +89,17 @@ function UserList() {
           <div className="admin-table-wrap" aria-busy={state.status === "refreshing"}>
             <table className="data">
               <caption className="sr-only">Users</caption>
-              <thead><tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Teams</th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Teams</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>{rows.map((u) => (
-                <tr key={u.id} className="row-link" style={{ cursor: "pointer" }}
-                  onClick={(e) => { if (!e.target.closest("a, button") && !window.getSelection()?.toString()) navigate(`/settings/users/${u.id}`); }}>
+                <tr key={u.id}>
                   <td>
-                    <a href={`/settings/users/${u.id}`} onClick={(e) => { e.preventDefault(); navigate(`/settings/users/${u.id}`); }}>{u.name}</a>
+                    <div>{u.name}</div>
                     <div className="small muted admin-email">{u.email}</div>
                   </td>
                   <td>{roleLabel(u.role)}</td>
                   <td>{u.is_active ? <span className="chip ok">Active</span> : <span className="chip bad">Deactivated</span>}</td>
                   <td>{u.teams.length ? u.teams.map((t) => t.name).join(", ") : <span className="muted">—</span>}</td>
+                  <td><button type="button" className="btn sm" onClick={() => navigate(`/settings/users/${u.id}`)} aria-label={`Edit ${u.name}`}>Edit</button></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -211,6 +211,8 @@ function UserDetail({ id }) {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(null); // "role" | "deactivate" | "reactivate"
   const [attempt, setAttempt] = useState(0);
+  const [teams, setTeams] = useState(null);
+  const [teamId, setTeamId] = useState(null); // null = untouched; "" = no team
 
   const load = (keepResult = false) => {
     setState((s) => ({ ...s, status: s.data ? "refreshing" : "loading" }));
@@ -219,9 +221,11 @@ function UserDetail({ id }) {
       setState({ status: "ready", data });
       setDraft(userDraft(data));
       setSkillsText((data.skills || []).join(", "));
+      setTeamId(null);
     }).catch((e) => setState(loadError(e, "user")));
   };
   useEffect(() => { load(); }, [id, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { api("/admin/teams/").then((r) => setTeams(r.results || [])).catch(() => setTeams([])); }, []);
   useEffect(() => { api("/admin/user-options/").then(setOptions).catch(() => setOptions({ departments: [], accounts: [], managers: [] })); }, []);
 
   if (state.status !== "ready" && state.status !== "refreshing") {
@@ -232,7 +236,10 @@ function UserDetail({ id }) {
   const can = (f) => perms.editable_fields.includes(f);
   const current = { ...draft, skills: parseSkills(skillsText) };
   const changes = userChanges(userDraft(u), current, perms.editable_fields);
-  const dirty = Object.keys(changes).length > 0;
+  const currentTeamId = u.teams[0]?.id ?? "";
+  const teamEditable = u.role === "employee" && draft.role === "employee" && perms.editable_fields.length > 0;
+  const teamChanged = teamEditable && teamId !== null && String(teamId) !== String(currentTeamId);
+  const dirty = Object.keys(changes).length > 0 || teamChanged;
   const set = (k, fn = (e) => e.target.value) => (e) => setDraft((d) => ({ ...d, [k]: fn(e) }));
   const idOrNull = (e) => (e.target.value ? Number(e.target.value) : null);
   // Employees report to a team lead and team leads to a manager; managers and customers report to nobody.
@@ -247,10 +254,24 @@ function UserDetail({ id }) {
     setBusy(true);
     setResult(null);
     try {
-      const data = await api(`/admin/users/${id}/`, { method: "PATCH", body: changes, headers: ifMatch(u.version) });
+      if (teamChanged) {
+        // Membership is stored on the team: take the employee out of their current team(s), then add them to the chosen one.
+        const setMember = async (tid, present) => {
+          const t = await api(`/admin/teams/${tid}/`);
+          const ids = t.members.map((m) => m.id).filter((x) => x !== u.id);
+          if (present) ids.push(u.id);
+          await api(`/admin/teams/${tid}/members/`, { method: "PUT", body: { user_ids: ids }, headers: ifMatch(t.version) });
+        };
+        for (const t of u.teams) if (String(t.id) !== String(teamId)) await setMember(t.id, false);
+        if (teamId !== "") await setMember(teamId, true);
+      }
+      const data = Object.keys(changes).length
+        ? await api(`/admin/users/${id}/`, { method: "PATCH", body: changes, headers: ifMatch(u.version) })
+        : await api(`/admin/users/${id}/`);
       setState({ status: "ready", data });
       setDraft(userDraft(data));
       setSkillsText((data.skills || []).join(", "));
+      setTeamId(null);
       setResult({ ok: true, message: "Changes saved." });
     } catch (e) {
       setResult({ ok: false, message: writeError(e, "user"), stale: e.status === 412 });
@@ -311,7 +332,6 @@ function UserDetail({ id }) {
         <div className="admin-grid">
           <label className="field"><span>First name</span><input className="input" value={draft.first_name} onChange={set("first_name")} disabled={!can("first_name")} maxLength={150} /></label>
           <label className="field"><span>Last name</span><input className="input" value={draft.last_name} onChange={set("last_name")} disabled={!can("last_name")} maxLength={150} /></label>
-          <label className="field"><span>Phone</span><input className="input" type="tel" value={draft.phone} onChange={set("phone")} disabled={!can("phone")} maxLength={32} placeholder="+91 98450 12345" /></label>
           {((can("account_id") && draft.role === "customer") || u.account) && (
             <label className="field"><span>Account</span>
               <select className="input" value={draft.account_id ?? ""} onChange={set("account_id", idOrNull)} disabled={!can("account_id") || !options}>
@@ -319,6 +339,14 @@ function UserDetail({ id }) {
                 {(options?.accounts || []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                 {u.account && !(options?.accounts || []).some((a) => a.id === u.account.id) && <option value={u.account.id}>{u.account.name}</option>}
               </select></label>
+          )}
+          {teamEditable && (
+            <label className="field"><span>Team</span>
+              <select className="input" value={teamId ?? currentTeamId} onChange={(e) => setTeamId(e.target.value ? Number(e.target.value) : "")} disabled={!teams}>
+                <option value="">No team</option>
+                {(teams || []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+              <span className="hint">Employees see and work tickets routed to their team.</span></label>
           )}
           {REPORTS_TO[draft.role] && (
             <label className="field"><span>Reports to</span>
@@ -347,7 +375,7 @@ function UserDetail({ id }) {
         {!readOnly && (
           <div className="row admin-actions">
             <button type="submit" className="btn primary sm" disabled={!dirty || busy}>{busy && !confirm ? "Saving…" : "Save changes"}</button>
-            {dirty && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => { setDraft(userDraft(u)); setSkillsText((u.skills || []).join(", ")); }}>Discard</button>}
+            {dirty && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => { setTeamId(null); setDraft(userDraft(u)); setSkillsText((u.skills || []).join(", ")); }}>Discard</button>}
           </div>
         )}
       </form>

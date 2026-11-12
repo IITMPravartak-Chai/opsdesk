@@ -21,7 +21,7 @@ from ...db.models import (Account, Approval, Attachment, CannedResponse, Categor
                           Interaction, Priority, Service, State, Team, Ticket, TicketLink, TicketType, TicketWatcher,
                           TimeEntry, Transition, User)
 from ...db.models.core import PRIVILEGED_ROLES, STAFF_ROLES
-from ...services import commit_hooks, tickets as services
+from ...services import commit_hooks, notifications, tickets as services
 from ...services.attachments import AttachmentRejected, store_attachment
 from ...services.audit import audit
 from ...services.visibility import visible_ticket_criteria
@@ -614,6 +614,7 @@ async def request_approval(payload: dict, id: int = Path(..., ge=1), user: Authe
                          requested_by_id=actor.id, status="pending")
             s.add(a)
             s.flush()
+            notifications.notify_approval_requested(s, ticket, approver, actor=actor)
         services.log_event(s, ticket, "approval_requested", actor, approver=approver.display_name)
         return a.id
 
@@ -641,6 +642,7 @@ async def decide_approval(payload: dict, id: int = Path(..., ge=1), approval_id:
         approval.decided_at = utcnow()
         s.flush()
         services.log_event(s, ticket, f"approval_{approval.status}", actor, comment=approval.comment)
+        notifications.notify_approval_decided(s, ticket, approval, actor=actor)
         return approval.status
 
     return {"status": await run_in_tenant(user, _decide)}
@@ -793,6 +795,8 @@ async def designate_major(payload: MajorDesignateRequest, id: int = Path(..., ge
                       f"Incident Commander: {t.incident_commander.display_name if t.incident_commander else 'Unassigned'}\n"
                       f"Status: {t.major_incident_status}"),
                 source="portal", delivery_status="n/a", external_message_id="", delivery_error="", created_at=utcnow()))
+            if not old_major:
+                notifications.notify_major_incident(s, t, actor=actor)
         else:
             t.major_incident_status = ""
             services.log_event(s, t, "major_incident_demoted", actor)
