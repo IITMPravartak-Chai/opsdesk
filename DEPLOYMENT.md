@@ -207,8 +207,8 @@ Create four services (five with ClamAV) from two task definitions.
 | Service | Image | Command | Desired | Health check |
 |---|---|---|---|---|
 | api | opsdesk-api | `api` | 2+ | ALB target group: `GET /healthz` on 8001 |
-| worker | opsdesk-api | `worker` | 2+ | none (monitor queue depth) |
-| beat | opsdesk-api | `beat` | **1** (min 1, max 1; deployment min healthy 0%, max 100%) | none |
+| worker | opsdesk-api | `worker` | 2+ | container: `./healthcheck.sh worker` (Celery process; also monitor queue depth) |
+| beat | opsdesk-api | `beat` | **1** (min 1, max 1; deployment min healthy 0%, max 100%) | container: `./healthcheck.sh beat` (Celery process) |
 | web | opsdesk-web | (default) | 2 | ALB target group: `GET /` on 8080 |
 | clamav (optional) | `clamav/clamav:stable` | (default) | 1-2 | TCP 3310; give it 3 GB memory |
 

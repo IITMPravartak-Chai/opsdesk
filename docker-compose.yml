@@ -37,24 +37,37 @@ services:
     <<: *app
     command: ["migrate"]
     restart: "no"
+    healthcheck: { disable: true }   # runs once and exits
 
   api:
     <<: *app
     command: ["api"]
     depends_on:
       migrate: { condition: service_completed_successfully }
+    healthcheck: &healthcheck        # HTTP GET /healthz
+      test: ["CMD", "./healthcheck.sh", "api"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   worker:
     <<: *app
     command: ["worker"]
     depends_on:
       migrate: { condition: service_completed_successfully }
+    healthcheck:                     # the Celery worker process (no HTTP port)
+      <<: *healthcheck
+      test: ["CMD", "./healthcheck.sh", "worker"]
 
   beat:
     <<: *app
     command: ["beat"]
     depends_on:
       migrate: { condition: service_completed_successfully }
+    healthcheck:                     # the Celery beat process (no HTTP port)
+      <<: *healthcheck
+      test: ["CMD", "./healthcheck.sh", "beat"]
 
   web:
     build: .
