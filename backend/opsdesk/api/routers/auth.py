@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi import Response
 from fastapi.responses import JSONResponse
@@ -16,9 +15,10 @@ from ...db.models import (Account, Category, ConfigurationItem, Priority, Servic
 from ...db.models.core import STAFF_ROLES
 from ...db.models.workflow import IMPACT_LABELS, URGENCY_LABELS
 from ...db.session import plain_session, tenant_session
-from ...security import login_throttle, passwords, tokens
+from ...security import email_otp, login_throttle, passwords, tokens
 from ...services.audit import audit
 from ...settings import settings
+from ..multipart_helper import MAX_UPLOAD_SIZE
 from ..runtime import run_in_tenant
 from ..schemas.core import (AccountMeta, CategoryMeta, CIMeta, CustomFieldMeta, LabelValue, LoginRequest,
                             LoginResponse, MetaResponse, MfaSetupResponse, PriorityMeta, RefreshTokenRequest,
@@ -91,18 +91,28 @@ def _login(payload: LoginRequest, request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=BAD_LOGIN)
 
     if row.mfa_enabled:
-        # The body carries "mfa_required" like the reference LoginView; the sign-in form only shows its code field
-        # when it sees that flag, so without it an MFA-enabled user could never finish signing in.
+        # Second step: a one-time code emailed to the account's own address (security/email_otp.py). The body carries
+        # "mfa_required"; the sign-in form only shows its code field when it sees that flag.
         code = str(payload.otp or "").strip()
-        if not code:
-            throttle.challenged()  # correct password; the code is the next step, not a failed attempt
-            return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
-                "detail": "Enter the 6-digit code from your authenticator app.", "mfa_required": True})
-        with tenant_session(row.tenant_id, commit=False) as s:
-            secret = s.scalars(select(User.mfa_secret).where(User.id == row.user_id)).first()
-        if not secret or not pyotp.TOTP(secret).verify(code, valid_window=1):
-            return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
-                "detail": "That code didn't match. Try the newest code.", "mfa_required": True})
+        try:
+            if not code:
+                sent = email_otp.send(get_redis_client(), settings.jwt_secret_key, email_otp.LOGIN, row.user_id, row.email)
+                throttle.challenged()  # correct password; the code is the next step, not a failed attempt
+                masked = email_otp.mask_email(row.email)
+                detail = (f"We emailed a 6-digit code to {masked}. Enter it to finish signing in." if sent else
+                          f"A code was already sent to {masked}. Check your inbox, or wait a minute and ask for a new one.")
+                return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
+                    "detail": detail, "mfa_required": True, "otp_sent": True})
+            if not email_otp.verify(get_redis_client(), settings.jwt_secret_key, email_otp.LOGIN, row.user_id, code):
+                return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
+                    "detail": "That code didn't match or has expired. Check the newest email, or send a new code.",
+                    "mfa_required": True})
+        except email_otp.DeliveryFailed:
+            throttle.challenged()
+            return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={
+                "detail": email_otp.NOT_SENT, "mfa_required": True})
+        except email_otp.StoreUnavailable:
+            return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": login_throttle.UNAVAILABLE})
 
     throttle.succeeded()
     refresh, _claims = tokens.issue_refresh(row.user_id, row.tenant_id, row.role)
@@ -122,7 +132,7 @@ def tokens_now():
 @router.post("/api/auth/login/", response_model=LoginResponse)
 @router.post("/api/auth/token/", response_model=LoginResponse)
 async def login(payload: LoginRequest, request: Request):
-    """Authenticate with email and password, verifying TOTP MFA if enabled.
+    """Authenticate with email and password; with two-step sign-in on, also with a one-time code sent by email.
 
     Rate limited per account and per client address before any password is checked (login_throttle.py): 429 with
     Retry-After when a limit is reached, 503 if the shared limit store is unreachable (fail closed)."""
@@ -186,31 +196,48 @@ async def update_current_user_profile(payload: dict, user: AuthenticatedUser = D
     return await run_in_tenant(user, _do)
 
 
+def _switch_two_step(s, user: AuthenticatedUser, code, turn_on: bool) -> MfaSetupResponse:
+    """Turn the caller's own two-step sign-in on or off. An empty post emails a confirmation code to the account's
+    address; a post with that code makes the change. Turning it on this way proves the mailbox receives codes;
+    turning it off this way means a stolen session alone cannot remove the second step."""
+    u = s.scalars(select(User).where(User.id == user.user_id, User.tenant_id == user.tenant_id)).first()
+    if not u:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Two-step sign-in isn't available for this user.")
+    if u.mfa_enabled == turn_on:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Two-step sign-in is already {'on' if turn_on else 'off'}.")
+    purpose = email_otp.ENABLE if turn_on else email_otp.DISABLE
+    try:
+        if not code:
+            email_otp.send(get_redis_client(), settings.jwt_secret_key, purpose, u.id, u.email)
+            return MfaSetupResponse(mfa_enabled=u.mfa_enabled, sent_to=email_otp.mask_email(u.email))
+        if not email_otp.verify(get_redis_client(), settings.jwt_secret_key, purpose, u.id, code):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Code didn't match.")
+    except email_otp.DeliveryFailed:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=email_otp.NOT_SENT)
+    except email_otp.StoreUnavailable:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=email_otp.UNAVAILABLE)
+    u.mfa_enabled = turn_on
+    u.mfa_secret = ""  # left over from authenticator-app sign-in; no longer used
+    audit(s, u.tenant_id, "auth.mfa_enabled" if turn_on else "auth.mfa_disabled", u, u)
+    return MfaSetupResponse(mfa_enabled=turn_on)
+
+
 @router.post("/api/auth/mfa/", response_model=MfaSetupResponse)
 async def mfa_setup(payload: Optional[dict] = None, user: AuthenticatedUser = Depends(get_authenticated_user)):
-    """MFA setup: provisioning URI on empty post, verification with code. Open to every signed-in user and acts only
-    on the caller's own account (the token's user); no user id is accepted."""
+    """Turn on two-step sign-in (a code by email at every sign-in): empty post emails a confirmation code, a post
+    with `code` turns it on. Open to every signed-in user and acts only on the caller's own account (the token's
+    user); no user id is accepted."""
     code = (payload or {}).get("code")
+    return await run_in_tenant(user, lambda s: _switch_two_step(s, user, code, True))
 
-    def _do(s):
-        u = s.scalars(select(User).where(User.id == user.user_id, User.tenant_id == user.tenant_id)).first()
-        if not u:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MFA not configured for user.")
-        if u.mfa_enabled:
-            # Re-issuing the secret while MFA is on would let anyone holding a session token replace the account's
-            # second factor without a current code. Refuse instead.
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Two-step sign-in is already on.")
-        if not code:
-            u.mfa_secret = pyotp.random_base32()
-            uri = pyotp.TOTP(u.mfa_secret).provisioning_uri(name=u.email, issuer_name="OpsDesk")
-            return MfaSetupResponse(otpauth_uri=uri, secret=u.mfa_secret)
-        if u.mfa_secret and pyotp.TOTP(u.mfa_secret).verify(str(code), valid_window=1):
-            u.mfa_enabled = True
-            audit(s, u.tenant_id, "auth.mfa_enabled", u, u)
-            return MfaSetupResponse(mfa_enabled=True)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Code didn't match.")
 
-    return await run_in_tenant(user, _do)
+@router.post("/api/auth/mfa/disable/", response_model=MfaSetupResponse)
+async def mfa_disable(payload: Optional[dict] = None, user: AuthenticatedUser = Depends(get_authenticated_user)):
+    """Turn off the caller's own two-step sign-in, confirmed the same way: empty post emails a code, a post with
+    `code` turns it off."""
+    code = (payload or {}).get("code")
+    return await run_in_tenant(user, lambda s: _switch_two_step(s, user, code, False))
 
 
 @router.get("/api/meta/", response_model=MetaResponse)
@@ -283,6 +310,9 @@ async def get_meta(user: AuthenticatedUser = Depends(get_authenticated_user)):
             accounts=accounts_meta, services=services_meta, cis=cis_meta,
             impact=[LabelValue(value=k, label=v) for k, v in IMPACT_LABELS.items()],
             urgency=[LabelValue(value=k, label=v) for k, v in URGENCY_LABELS.items()],
-            teams=teams_meta, agents=agents_meta, states=states_meta)
+            teams=teams_meta, agents=agents_meta, states=states_meta,
+            attachment_limits={"max_file_mb": settings.attachment_max_mb,
+                               "max_request_mb": MAX_UPLOAD_SIZE // (1024 * 1024),
+                               "blocked_extensions": sorted(settings.attachment_blocked_extensions)})
 
     return await run_in_tenant(user, _do, commit=False)
