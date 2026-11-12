@@ -40,6 +40,15 @@ celerybeat-schedule*
 *.sqlite3
 *.log
 
+# Database dumps (backend/sql/*.sql is source and stays tracked)
+*.dump
+*.backup
+*.sql.gz
+/*.sql
+
+# Files written by test runs
+backend/tests/.media/
+
 # Editors / OS
 .vscode/
 .idea/

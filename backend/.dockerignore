@@ -1,5 +1,53 @@
-__pycache__/
-*.pyc
+# Keep the build context to what the image needs: the opsdesk package, alembic, sql, requirements and entrypoint.
+
+# Version control and Docker files
+.git
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile*
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and build output
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Runtime and test data
 media/
 staticfiles/
+**/.media/
+celerybeat-schedule*
+*.sqlite3
+*.log
+*.dump
+
+# Local environment files and secrets
 .env
+.env.*
+*.pem
+*.key
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

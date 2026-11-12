@@ -5,35 +5,43 @@ import { isSixDigitCode, mfaErrorMessage } from "./profileHelpers.js";
 
 export default function Profile() {
   const { user } = useApp();
-  const [setup, setSetup] = useState(null);
+  const [setup, setSetup] = useState(null); // { turnOn, sentTo } while a confirmation code is awaited
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState({ kind: "", text: "" });
 
+  const turnOn = !user.mfa_enabled; // the change on offer: on when it is off, off when it is on
+  const url = (on) => (on ? "/auth/mfa/" : "/auth/mfa/disable/");
+
+  // Step 1: the server emails a confirmation code to the account's own address.
   const start = async () => {
     setBusy("start");
     setMsg({ kind: "", text: "" });
     try {
-      setSetup(await api("/auth/mfa/", { method: "POST", body: {} }));
+      const res = await api(url(turnOn), { method: "POST", body: {} });
+      setSetup({ turnOn, sentTo: res?.sent_to || "your email" });
       setCode("");
     } catch (e) {
-      if (e.status === 409) updateUser({ ...user, mfa_enabled: true });
-      setMsg({ kind: "bad", text: mfaErrorMessage(e, "start") });
+      if (e.status === 409) updateUser({ ...user, mfa_enabled: turnOn });
+      setMsg({ kind: "bad", text: mfaErrorMessage(e, "start", turnOn) });
     } finally {
       setBusy("");
     }
   };
+  // Step 2: the code makes the change. Nothing is shown as changed until the server says so.
   const confirm = async () => {
     setBusy("confirm");
     setMsg({ kind: "", text: "" });
     try {
-      const res = await api("/auth/mfa/", { method: "POST", body: { code: code.trim() } });
-      if (!res?.mfa_enabled) throw new Error("not enabled");
-      updateUser({ ...user, mfa_enabled: true });
+      const res = await api(url(setup.turnOn), { method: "POST", body: { code: code.trim() } });
+      if (res?.mfa_enabled !== setup.turnOn) throw new Error("not changed");
+      updateUser({ ...user, mfa_enabled: setup.turnOn });
       setSetup(null);
-      setMsg({ kind: "ok", text: "Two-step sign-in is on. You'll be asked for a code each time you sign in." });
+      setMsg({ kind: "ok", text: setup.turnOn
+        ? "Two-step sign-in is on. Each time you sign in, we'll email you a code to enter."
+        : "Two-step sign-in is off. You'll sign in with your password only." });
     } catch (e) {
-      setMsg({ kind: "bad", text: mfaErrorMessage(e, "confirm") });
+      setMsg({ kind: "bad", text: mfaErrorMessage(e, "confirm", setup.turnOn) });
     } finally {
       setBusy("");
     }
@@ -51,18 +59,26 @@ export default function Profile() {
           {user.account && <><dt>Organisation</dt><dd>{user.account.name}</dd></>}
           <dt>Two-step sign-in</dt><dd>{user.mfa_enabled ? "On" : "Off"}</dd>
         </dl>
-        {!user.mfa_enabled && !setup && (
-          <button className="btn" style={{ justifySelf: "start" }} onClick={start} disabled={busy !== ""}>
-            {busy === "start" ? "Starting…" : "Turn on two-step sign-in"}
-          </button>
+        {!setup && (
+          <>
+            <p className="small" style={{ margin: 0 }}>
+              {turnOn
+                ? "With two-step sign-in, we email a 6-digit code to your address each time you sign in, and you enter it after your password."
+                : "Each time you sign in, we email a 6-digit code to your address."}
+            </p>
+            <button className="btn" style={{ justifySelf: "start" }} onClick={start} disabled={busy !== ""}>
+              {busy === "start" ? "Sending code…" : turnOn ? "Turn on two-step sign-in" : "Turn off two-step sign-in"}
+            </button>
+          </>
         )}
         {setup && (
           <div className="stack">
-            <p className="small" style={{ margin: 0 }} id="mfa-help">Add this key to an authenticator app (Microsoft Authenticator, Google Authenticator, 1Password), then enter the 6-digit code it shows. Two-step sign-in stays off until the code is confirmed.</p>
-            <code style={{ background: "var(--sunk)", padding: 8, borderRadius: 6, wordBreak: "break-all" }} aria-label="Authenticator setup key">{setup.secret}</code>
+            <p className="small" style={{ margin: 0 }} id="mfa-help">
+              We emailed a 6-digit code to {setup.sentTo}. Enter it to turn two-step sign-in {setup.turnOn ? "on" : "off"}. It stays {setup.turnOn ? "off" : "on"} until the code is confirmed.
+            </p>
             <div className="row">
               <input className="input" style={{ width: 140 }} inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code}
-                onChange={(e) => setCode(e.target.value)} aria-label="Authenticator code" aria-describedby="mfa-help" />
+                onChange={(e) => setCode(e.target.value)} aria-label="Code from your email" aria-describedby="mfa-help" />
               <button className="btn primary" onClick={confirm} disabled={!isSixDigitCode(code) || busy !== ""}>
                 {busy === "confirm" ? "Confirming…" : "Confirm"}
               </button>

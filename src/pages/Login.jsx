@@ -11,21 +11,26 @@ export default function Login() {
   const [otp, setOtp] = useState("");
   const [needOtp, setNeedOtp] = useState(false);
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const submit = async (e) => {
-    e.preventDefault();
+  // Without a code the server emails one (two-step sign-in) and answers mfa_required; with a code it checks it.
+  const attempt = async (code) => {
     setBusy(true);
     setError("");
+    setInfo("");
     try {
-      await login(email.trim(), password, otp || undefined);
+      await login(email.trim(), password, code || undefined);
     } catch (err) {
       if (err.data?.mfa_required) setNeedOtp(true);
-      setError(err.message);
+      if (err.data?.otp_sent) setInfo(err.message);
+      else setError(err.message);
     } finally {
       setBusy(false);
     }
   };
+  const submit = (e) => { e.preventDefault(); attempt(needOtp ? otp.trim() : ""); };
+  const resend = () => { setOtp(""); attempt(""); };
 
   return (
     <div className="auth-wrap">
@@ -51,12 +56,14 @@ export default function Login() {
             <input className="input" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
           </label>
           {needOtp && (
-            <label className="field"><span>Authenticator code</span>
-              <input className="input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value)} autoFocus />
+            <label className="field"><span>Code from your email</span>
+              <input className="input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={otp} onChange={(e) => setOtp(e.target.value)} autoFocus />
             </label>
           )}
+          {info && <div className="notice" role="status">{info}</div>}
           {error && <div className="error" role="alert">{error}</div>}
           <button className="btn primary" disabled={busy}>{busy ? "Signing in..." : "Sign in"}</button>
+          {needOtp && <button type="button" className="btn ghost" onClick={resend} disabled={busy}>Send a new code</button>}
         </form>
       </main>
     </div>

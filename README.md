@@ -66,7 +66,7 @@ Statuses, transitions, which roles may perform them, required fields, mandatory 
 - Ticket links, merge and parent/child relationships.
 - Approvals for changes and requests.
 - Attachments with type and size limits, ClamAV scanning, and private S3 storage with short-lived presigned downloads.
-- TOTP two-step sign-in, an append-only audit log, and PostgreSQL row-level security.
+- Two-step sign-in with a one-time code sent by email, an append-only audit log, and PostgreSQL row-level security.
 
 ---
 
@@ -371,8 +371,8 @@ All endpoints are under `/api/` and take JWT `Authorization: Bearer <access>` un
 
 | Endpoint | Purpose |
 |---|---|
-| `POST auth/login/` (public) | `{email, password, otp?}` → access/refresh tokens |
-| `POST auth/refresh/`, `GET/PATCH auth/me/`, `POST auth/mfa/` | Session, profile/availability, MFA enrolment |
+| `POST auth/login/` (public) | `{email, password, otp?}` → access/refresh tokens. With two-step sign-in on, a request without `otp` emails a 6-digit code and answers `401 {mfa_required, otp_sent}` |
+| `POST auth/refresh/`, `GET/PATCH auth/me/`, `POST auth/mfa/`, `POST auth/mfa/disable/` | Session, profile/availability, turning two-step sign-in on / off (empty post emails a code, `{code}` confirms) |
 | `GET meta/` | Everything the UI needs to render forms |
 | `GET/POST tickets/` | List (filters: `q, open, state_category, priority, assignee=me\|none\|id, team, account, type, sla_status, source, major, mine, ordering`) / create |
 | `GET/PATCH tickets/{id}/` | Detail (includes available transitions) / update fields |
@@ -400,7 +400,7 @@ All endpoints are under `/api/` and take JWT `Authorization: Bearer <access>` un
   - System work that crosses tenants (resolving a webhook token to its channel, schedulers) runs in an explicit `system_context()`.
   - `core_user` is deliberately outside RLS because login happens before a tenant is known.
 - **Row visibility**: customers see their own account's tickets and only public replies. Agents see the accounts their teams cover. Managers and admins see the whole tenant.
-- **Authentication**: 15-minute access tokens, rotating refresh tokens with a blacklist, TOTP two-step sign-in, login throttling shared via Redis, and a 12-character minimum password.
+- **Authentication**: 15-minute access tokens, rotating refresh tokens with a blacklist, optional two-step sign-in (a 6-digit code emailed at each sign-in: valid 10 minutes, single use, one new code per minute, dropped after 5 wrong tries; needs working outbound SMTP), login throttling shared via Redis, and a 12-character minimum password.
 - **Channels**: every webhook is authenticated (HMAC signatures for WhatsApp/webhook, shared token for email). Inbound URLs contain an unguessable token. Credentials are encrypted with Fernet and support key rotation.
 - **Data**: the audit log is append-only (a DB trigger blocks UPDATE/DELETE). Attachments get type/size limits, an optional ClamAV scan and private storage with 5-minute presigned links. PII is redacted before any LLM call.
 - **Web**: HSTS, secure cookies, a strict CSP and anti-framing headers from nginx, and a non-root container user.

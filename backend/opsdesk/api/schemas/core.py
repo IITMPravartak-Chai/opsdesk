@@ -42,6 +42,7 @@ class MfaSetupResponse(BaseModel):
     otpauth_uri: Optional[str] = None
     secret: Optional[str] = None
     mfa_enabled: Optional[bool] = None
+    sent_to: Optional[str] = None  # masked address a confirmation code was emailed to
 
 
 class CustomFieldMeta(BaseModel):

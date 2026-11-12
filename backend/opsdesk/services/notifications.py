@@ -7,7 +7,8 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db.models import Notification, NotificationPreference
+from ..db.models import Notification, NotificationPreference, User
+from ..db.models.core import PRIVILEGED_ROLES
 from ..settings import settings
 from . import commit_hooks
 
@@ -63,7 +64,7 @@ def create_in_app_notification(session: Session, ticket, recipient, event_type, 
     if prefs and not prefs.in_app_enabled:
         return None
     if prefs:
-        if event_type == "assigned" and not prefs.notify_on_assignment:
+        if event_type in ("assigned", "unassigned") and not prefs.notify_on_assignment:
             return None
         if event_type in ("reply", "resolved", "status_changed") and not prefs.notify_on_replies:
             return None
@@ -89,6 +90,51 @@ def create_in_app_notification(session: Session, ticket, recipient, event_type, 
         return None
 
 
+def team_supervisors(ticket) -> list:
+    """Who oversees the ticket's team: its named team lead and manager, plus any member holding a lead or manager
+    role (so a team without named supervisors still has someone to alert)."""
+    team = ticket.team
+    if team is None:
+        return []
+    people = [team.team_lead, team.manager, *(m for m in team.members if m.role in PRIVILEGED_ROLES)]
+    return list({u.id: u for u in people if u is not None}.values())
+
+
+def _notify_each(session: Session, ticket, recipients, event_type, title, body="", actor=None, skip_ids=()) -> None:
+    for recipient in {u.id: u for u in recipients if u is not None and u.id not in skip_ids}.values():
+        create_in_app_notification(session, ticket, recipient, event_type, title, body, actor=actor)
+
+
+def notify_unassigned(session: Session, ticket, actor=None) -> None:
+    """A ticket sits in a team with nobody assigned (new, transferred in, or its assignee was removed)."""
+    if ticket.assignee_id or ticket.team is None:
+        return
+    _notify_each(session, ticket, team_supervisors(ticket), "unassigned",
+                 f"Unassigned ticket {ticket.number} in {ticket.team.name}", f"{ticket.subject}", actor=actor)
+
+
+def notify_major_incident(session: Session, ticket, actor=None) -> None:
+    """Every lead and manager of the tenant, the team's supervisors, the assignee and the incident commander."""
+    leaders = session.scalars(select(User).where(User.tenant_id == ticket.tenant_id, User.role.in_(PRIVILEGED_ROLES),
+                                                 User.is_active.is_(True))).all()
+    _notify_each(session, ticket, [*leaders, *team_supervisors(ticket), ticket.assignee, ticket.incident_commander],
+                 "major_incident", f"Major incident declared: {ticket.number}", f"{ticket.subject}", actor=actor)
+
+
+def notify_approval_requested(session: Session, ticket, approver, actor=None) -> None:
+    create_in_app_notification(session, ticket, approver, "approval_requested",
+                               f"Approval requested on {ticket.number}", f"{ticket.subject}", actor=actor)
+
+
+def notify_approval_decided(session: Session, ticket, approval, actor=None) -> None:
+    """Tell whoever asked for the approval, the requester and the assignee how it was decided."""
+    granted = approval.status == "approved"
+    _notify_each(session, ticket, [approval.requested_by, ticket.requester, ticket.assignee],
+                 "approval_granted" if granted else "approval_rejected",
+                 f"Approval {'granted' if granted else 'rejected'} on {ticket.number}",
+                 (approval.comment or ticket.subject or "")[:200], actor=actor)
+
+
 def notify_assignment(session: Session, ticket, actor=None) -> None:
     if ticket.assignee and ticket.assignee.email:
         send(session, [ticket.assignee.email], f"[{ticket.number}] Assigned to you: {ticket.subject}",
@@ -111,23 +157,34 @@ def notify_ticket_created(session: Session, ticket) -> None:
              f"{ticket.account.name if ticket.account else 'unknown account'}.\n{ticket_url(ticket)}")
 
 
-def notify_portal_reply(session: Session, ticket, interaction) -> None:
-    # Internal notes must NEVER be disclosed to requesters
-    if interaction.kind != "public":
-        if ticket.assignee and (not interaction.author_id or interaction.author_id != ticket.assignee_id):
+def notify_interaction(session: Session, ticket, interaction, author=None) -> None:
+    """In-app notification for a new reply or internal note, whatever its direction or channel (portal, mobile,
+    email, WhatsApp). Runs in the transaction that adds the interaction, so a rollback leaves nothing behind.
+    The author is never notified of their own message (see create_in_app_notification)."""
+    body = (interaction.body or "")[:200]
+    if interaction.kind == "internal":
+        # Internal notes must NEVER be disclosed to requesters: only the assignee hears about them. A note without
+        # an author is written by an automation rule and is not worth an alert.
+        if author is not None and ticket.assignee:
             create_in_app_notification(session, ticket, ticket.assignee, "reply", f"Internal note on {ticket.number}",
-                                       (interaction.body or "")[:200], actor=interaction.author)
+                                       body, actor=author)
         return
+    if interaction.kind != "public":
+        return
+    recipients = {u.id: u for u in (ticket.assignee, ticket.requester) if u is not None}
+    for recipient in recipients.values():
+        create_in_app_notification(session, ticket, recipient, "reply", f"New reply on {ticket.number}", body,
+                                   actor=author)
 
+
+def notify_portal_reply(session: Session, ticket, interaction) -> None:
+    """Email a public staff reply to the requester of a ticket that has no outbound channel. The in-app
+    notification is created by notify_interaction when the reply is added."""
+    if interaction.kind != "public":  # internal notes must NEVER be disclosed to requesters
+        return
     if ticket.requester and ticket.requester.email:
         send(session, [ticket.requester.email], f"[{ticket.number}] New reply: {ticket.subject}",
              f"{interaction.body}\n\n---\nView or reply: {ticket_url(ticket)}")
-    if ticket.assignee and (not interaction.author_id or interaction.author_id != ticket.assignee_id):
-        create_in_app_notification(session, ticket, ticket.assignee, "reply", f"New reply on {ticket.number}",
-                                   (interaction.body or "")[:200], actor=interaction.author)
-    elif ticket.requester and interaction.author_id and interaction.author_id != ticket.requester_id:
-        create_in_app_notification(session, ticket, ticket.requester, "reply", f"New reply on {ticket.number}",
-                                   (interaction.body or "")[:200], actor=interaction.author)
 
 
 def notify_resolved(session: Session, ticket, survey=None, actor=None) -> None:
@@ -153,10 +210,9 @@ def notify_sla(session: Session, ticket, level: str) -> None:
     due = ticket.resolution_due_at.strftime("%Y-%m-%d %H:%M UTC") if ticket.resolution_due_at else "-"
     send(session, to, f"[{ticket.number}] SLA {level.replace('_', ' ')}: {ticket.subject}",
          f"The SLA for {ticket.number} {word}. Resolution due {due}.\n{ticket_url(ticket)}")
-    if ticket.assignee:
-        create_in_app_notification(session, ticket, ticket.assignee, f"sla_{level}",
-                                   f"SLA {level.replace('_', ' ')}: {ticket.number}",
-                                   f"SLA {word} for {ticket.subject}", actor=None)
+    # The assignee, and the people who oversee the ticket's team.
+    _notify_each(session, ticket, [ticket.assignee, *team_supervisors(ticket)], f"sla_{level}",
+                 f"SLA {level.replace('_', ' ')}: {ticket.number}", f"SLA {word} for {ticket.subject}")
 
 
 def notify_team_transfer(session: Session, ticket, old_team, new_team) -> None:

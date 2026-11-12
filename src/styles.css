@@ -90,54 +90,7 @@
   padding-top: env(safe-area-inset-top, 0px);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    /* Surface & Canvas (Dark) */
-    --color-canvas: #090D16;
-    --color-surface: #111827;
-    --color-surface-muted: #1F2937;
-
-    /* Typography & Text (Dark) */
-    --color-text: #F8FAFC;
-    --color-text-muted: #94A3B8;
-
-    /* Borders (Dark) - UI-DEC-004 Approved */
-    --color-border-subtle: #1F2937;
-    --color-border-control: #64748B; /* 3.73:1 on #111827 (passes SC 1.4.11 >= 3.0:1) */
-
-    /* Brand & Interactive (Dark) - UI-DEC-004 Approved */
-    --color-primary: #6366F1; /* Non-text & large headings (3.97:1 on #111827) */
-    --color-link-default: #818CF8; /* 5.95:1 on #111827 (passes SC 1.4.3 AA >= 4.5:1) */
-    --color-link-hover: #A5B4FC; /* 8.90:1 on #111827 (passes AAA >= 7.0:1) */
-    --color-link-disabled: #64748B; /* Explicit opaque (3.73:1, opacity 1.0, pointer-events: none) */
-    --color-focus: #818CF8; /* 5.95:1 on #111827 (passes SC 1.4.11 >= 3.0:1) */
-
-    /* Semantic Feedback (Dark) */
-    --color-success: #34D399;
-    --color-success-muted: #143222;
-    --color-warning: #FBBF24;
-    --color-warning-muted: #3A2C10;
-    --color-danger: #F87171;
-    --color-danger-muted: #3D1B18;
-    --color-info: #60A5FA;
-    --color-info-muted: #1E293B;
-
-    /* Backward Compatibility Aliases (Dark) */
-    /* UI-DEC-004: #6366F1 is non-text only (3.97:1 on #111827). Accent text uses the approved
-       link tokens (5.95:1 / 8.90:1). No label colour reaches 4.5:1 on #6366F1 (#FFF 4.47, #090D16 4.35),
-       so the primary button fill uses #818CF8 / #A5B4FC with #090D16 labels (6.51:1 / 9.75:1). */
-    --accent-hover: var(--color-link-hover); /* Light #4338CA would otherwise leak into dark mode */
-    --btn-primary-bg: var(--color-link-default);
-    --btn-primary-bg-hover: var(--color-link-hover);
-    --pause: var(--color-text-muted); /* SLA "paused" chip label text: 6.92:1 on #111827 */
-    --accent-soft: rgba(99, 102, 241, 0.15);
-    --on-accent: #090D16;
-    --note: #2B2615;
-    --note-line: #574A22;
-
-    color-scheme: dark;
-  }
-}
+/* Light only: the app keeps this look when the device or browser is set to dark (no prefers-color-scheme override). */
 
 *, *::before, *::after { box-sizing: inherit; }
 html, body, #root { height: 100%; }

@@ -95,6 +95,30 @@ def wide_admin_access(monkeypatch):
     monkeypatch.setattr(channels, "ADMIN_ROLES", PRIVILEGED_ROLES)
 
 
+@pytest.fixture
+def emailed_codes(monkeypatch):
+    """Capture the mails that carry one-time codes instead of sending them. ``emailed_codes.last(email)`` is the
+    newest 6-digit code mailed to that address; ``emailed_codes.sent`` lists (recipient, subject, body)."""
+    import re
+
+    from opsdesk.services import mailer
+
+    class Box:
+        def __init__(self):
+            self.sent = []
+
+        def last(self, email):
+            for to, _subject, body in reversed(self.sent):
+                if to == email:
+                    return re.search(r"\b(\d{6})\b", body).group(1)
+            raise AssertionError(f"no code was mailed to {email}")
+
+    box = Box()
+    monkeypatch.setattr(mailer, "send_mail",
+                        lambda subject, body, recipients, **kw: box.sent.extend((r, subject, body) for r in recipients))
+    return box
+
+
 @pytest.fixture(autouse=True)
 def reset_throttle_state():
     """Replay slots (local store) and sign-in throttle counters are per-test state."""

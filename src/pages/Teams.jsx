@@ -52,6 +52,7 @@ function TeamList() {
   const [state, setState] = useState({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [notice] = useState(() => {
     try { const m = sessionStorage.getItem("opsdesk.admin.notice"); sessionStorage.removeItem("opsdesk.admin.notice"); return m; } catch { return null; }
   });
@@ -75,7 +76,7 @@ function TeamList() {
         <div className="admin-table-wrap">
           <table className="data">
             <caption className="sr-only">Teams</caption>
-            <thead><tr><th scope="col">Team</th><th scope="col">Team lead</th><th scope="col">Manager</th><th scope="col">Members</th><th scope="col">Assignment</th><th scope="col">Open tickets</th></tr></thead>
+            <thead><tr><th scope="col">Team</th><th scope="col">Team lead</th><th scope="col">Manager</th><th scope="col">Members</th><th scope="col">Assignment</th><th scope="col">Open tickets</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
             <tbody>{rows.map((t) => (
               <tr key={t.id}>
                 <td>
@@ -87,49 +88,82 @@ function TeamList() {
                 <td>{t.member_count}{t.ineligible_member_count > 0 && <> <span className="chip warn">{t.ineligible_member_count} not eligible</span></>}</td>
                 <td>{STRATEGY_LABELS[t.assignment_strategy] || t.assignment_strategy}</td>
                 <td>{t.open_ticket_count}</td>
+                <td><button type="button" className="btn sm" onClick={() => setEditing(t)} aria-label={`Edit ${t.name}`}>Edit</button></td>
               </tr>
             ))}</tbody>
           </table>
         </div>
       )}
-      {creating && <CreateTeam onClose={() => setCreating(false)} onCreated={(t) => navigate(`/settings/teams/${t.id}`)} />}
+      {creating && <TeamFormModal onClose={() => setCreating(false)} onSaved={(t) => navigate(`/settings/teams/${t.id}`)} />}
+      {editing && <TeamFormModal team={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setAttempt((n) => n + 1); }} />}
     </>
   );
 }
 
-function CreateTeam({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", email: "", assignment_strategy: "manual" });
+/** One modal for both creating and editing a team's details, including its team lead and manager. */
+function TeamFormModal({ team, onClose, onSaved }) {
+  const editing = !!team;
+  const [form, setForm] = useState({ name: "", email: "", assignment_strategy: "manual", team_lead_id: null, manager_id: null });
+  const [detail, setDetail] = useState(null);
+  const [options, setOptions] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  useEffect(() => { api("/admin/user-options/").then(setOptions).catch(() => setOptions({ team_leads: [], team_managers: [] })); }, []);
+  useEffect(() => {
+    if (!editing) return;
+    api(`/admin/teams/${team.id}/`).then((d) => {
+      setDetail(d);
+      setForm({ name: d.name, email: d.email || "", assignment_strategy: d.assignment_strategy, team_lead_id: d.team_lead?.id ?? null, manager_id: d.manager?.id ?? null });
+    }).catch((err) => setError(writeError(err, "team")));
+  }, [editing, team?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const submit = async (e) => {
     e.preventDefault();
     if (!form.name.trim()) { setError("Enter a team name."); return; }
     setBusy(true);
     setError("");
     try {
-      const t = await api("/admin/teams/", { method: "POST", body: { ...form, name: form.name.trim() } });
-      onCreated(t);
+      let t;
+      if (editing) {
+        const body = {};
+        if (form.name.trim() !== detail.name) body.name = form.name.trim();
+        if (form.email !== (detail.email || "")) body.email = form.email;
+        if (form.assignment_strategy !== detail.assignment_strategy) body.assignment_strategy = form.assignment_strategy;
+        if (form.team_lead_id !== (detail.team_lead?.id ?? null)) body.team_lead_id = form.team_lead_id;
+        if (form.manager_id !== (detail.manager?.id ?? null)) body.manager_id = form.manager_id;
+        t = Object.keys(body).length ? await api(`/admin/teams/${team.id}/`, { method: "PATCH", body, headers: ifMatch(detail.version) }) : detail;
+      } else {
+        t = await api("/admin/teams/", { method: "POST", body: { ...form, name: form.name.trim() } });
+      }
+      onSaved(t);
     } catch (err) {
       setError(writeError(err, "team"));
       setBusy(false);
     }
   };
+  const loading = editing && !detail && !error;
   return (
-    <Modal title="New team" onClose={busy ? () => {} : onClose} footer={(
+    <Modal title={editing ? `Edit team` : "New team"} onClose={busy ? () => {} : onClose} footer={(
       <>
         <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-        <button type="submit" form="new-team" className="btn primary" disabled={busy}>{busy ? "Creating…" : "Create team"}</button>
+        <button type="submit" form="team-form" className="btn primary" disabled={busy || loading || (editing && !detail)}>
+          {busy ? "Saving…" : editing ? "Save changes" : "Create team"}</button>
       </>
     )}>
-      <form id="new-team" className="stack" onSubmit={submit}>
-        <label className="field"><span>Name</span><input className="input" value={form.name} onChange={set("name")} maxLength={120} required autoFocus /></label>
-        <label className="field"><span>Email (optional)</span><input className="input" type="email" value={form.email} onChange={set("email")} maxLength={254} /></label>
+      <form id="team-form" className="stack" onSubmit={submit}>
+        <label className="field"><span>Name</span><input className="input" value={form.name} onChange={set("name")} maxLength={120} required autoFocus disabled={loading} /></label>
+        <label className="field"><span>Email (optional)</span><input className="input" type="email" value={form.email} onChange={set("email")} maxLength={254} disabled={loading} /></label>
         <label className="field"><span>Automatic assignment</span>
-          <select className="input" value={form.assignment_strategy} onChange={set("assignment_strategy")}>
+          <select className="input" value={form.assignment_strategy} onChange={set("assignment_strategy")} disabled={loading}>
             {Object.entries(STRATEGY_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select></label>
-        <p className="small muted">Add members after the team is created.</p>
+        <LeaderSelect label="Team lead" value={form.team_lead_id} current={detail?.team_lead} choices={options?.team_leads} disabled={!options || loading}
+          onChange={(v) => setForm((f) => ({ ...f, team_lead_id: v }))} empty="No team lead users yet" />
+        <LeaderSelect label="Manager" value={form.manager_id} current={detail?.manager} choices={options?.team_managers} disabled={!options || loading}
+          onChange={(v) => setForm((f) => ({ ...f, manager_id: v }))} empty="No manager users yet" />
+        {!editing && <p className="small muted">Add members after the team is created.</p>}
         {error && <div className="notice bad" role="alert">{error}</div>}
       </form>
     </Modal>

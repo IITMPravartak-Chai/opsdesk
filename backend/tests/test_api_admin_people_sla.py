@@ -127,11 +127,10 @@ class TestUsers:
             row = s.scalars(select(AuditLog).where(AuditLog.action == "admin.user.password_set")).one()
             assert "Brand-New" not in str(row.changes) and row.object_id == str(uid)
 
-    def test_admin_disables_mfa(self, api, world, auth):
-        import pyotp
+    def test_admin_disables_mfa(self, api, world, auth, emailed_codes):
         h = login_ok(api, world, "employee")
-        secret = api.post("/api/auth/mfa/", headers=h, json={}).json()["secret"]
-        api.post("/api/auth/mfa/", headers=h, json={"code": pyotp.TOTP(secret).now()})
+        api.post("/api/auth/mfa/", headers=h, json={})
+        assert api.post("/api/auth/mfa/", headers=h, json={"code": emailed_codes.last(world.email("employee"))}).json()["mfa_enabled"] is True
         assert api.post("/api/auth/login/", json={"email": world.email("employee"), "password": World.PASSWORD}).json()["mfa_required"]
         ha = auth("manager")
         assert api.post(f"{A}/users/{world.users['employee']}/mfa/disable/", headers=auth("team_lead")).status_code == 403
