@@ -13,10 +13,11 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
-RUN useradd --create-home --uid 10001 --user-group opsdesk && mkdir -p /app/media && chown -R opsdesk /app && chmod +x /app/entrypoint.sh
+RUN useradd --create-home --uid 10001 --user-group opsdesk && mkdir -p /app/media && chown -R opsdesk /app && chmod +x /app/entrypoint.sh /app/healthcheck.sh
 USER 10001:10001
 
 EXPOSE 8001
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS http://localhost:${API_PORT:-8001}/healthz || exit 1
+# One image, several roles: healthcheck.sh checks HTTP /healthz for the api and the Celery process for worker and beat.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["./healthcheck.sh"]
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["api"]

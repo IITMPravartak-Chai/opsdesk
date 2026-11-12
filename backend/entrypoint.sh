@@ -2,6 +2,9 @@
 # One image, several roles: api | worker | beat | migrate | <any `opsdesk` CLI command>
 set -e
 
+# healthcheck.sh reads this to know which check applies to this container.
+echo "$1" > /tmp/opsdesk-role 2>/dev/null || true
+
 case "$1" in
   api)
     exec uvicorn opsdesk.api.main:app --host 0.0.0.0 --port "${API_PORT:-8001}" \
