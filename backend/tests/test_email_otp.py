@@ -129,3 +129,38 @@ def test_store_outage_fails_closed():
 def test_mask_email():
     assert eo.mask_email("sreegousalya.v@corp.example") == "s***@corp.example"
     assert eo.mask_email("") == "your email" and eo.mask_email("nodomain") == "your email"
+
+
+def test_settings_that_are_not_positive_whole_numbers_fall_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("OPSDESK_TEST_LIMIT", "600")
+    assert eo._int("OPSDESK_TEST_LIMIT", 7) == 600
+    for bad in ("soon", "", "0", "-5", "1.5"):
+        monkeypatch.setenv("OPSDESK_TEST_LIMIT", bad)
+        assert eo._int("OPSDESK_TEST_LIMIT", 7) == 7, bad  # a bad or zero value never switches a control off
+    monkeypatch.delenv("OPSDESK_TEST_LIMIT")
+    assert eo._int("OPSDESK_TEST_LIMIT", 7) == 7
+
+
+def test_a_code_used_by_a_parallel_request_does_not_verify_twice(r):
+    """Both requests read the code, but only the one that deletes it wins."""
+    code = eo.issue(r, SECRET, eo.LOGIN, 7, cfg())
+
+    class LosesTheRace:
+        def __getattr__(self, name):
+            return getattr(r, name)
+
+        def delete(self, *keys):
+            r.delete(*keys)
+            return 0  # somebody else already removed it
+
+    assert eo.verify(LosesTheRace(), SECRET, eo.LOGIN, 7, code, cfg()) is False
+
+
+def test_discard_never_raises_when_the_store_is_down(r, caplog):
+    class Down:
+        def delete(self, *keys):
+            raise redis.RedisError("connection lost")
+
+    with caplog.at_level("ERROR", logger="opsdesk.email_otp"):
+        eo.discard(Down(), eo.LOGIN, 7)  # the mail already failed: a second failure must not hide it
+    assert "email code discard failed: RedisError" in caplog.text

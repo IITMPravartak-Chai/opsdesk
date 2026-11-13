@@ -21,4 +21,10 @@ export function mfaErrorMessage(err, phase, turnOn = true) {
     : "Couldn't send the code. Check your connection and try again.";
 }
 
+/** Text on the button that starts turning two-step sign-in on or off. */
+export function twoStepButtonLabel({ busy, turnOn }) {
+  if (busy === "start") return "Sending code…";
+  return turnOn ? "Turn on two-step sign-in" : "Turn off two-step sign-in";
+}
+
 export const isSixDigitCode = (code) => /^\d{6}$/.test(String(code || "").trim());

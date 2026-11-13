@@ -1,5 +1,6 @@
 import { FEATURES } from "../features.js";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import PropTypes from "prop-types";
 import { api, download } from "../api.js";
 import { useApp } from "../App.jsx";
 import { PriorityMark, SlaChip, StateChip } from "../components/Chips.jsx";
@@ -10,6 +11,9 @@ import Composer from "../components/Composer.jsx";
 import { isPrivilegedRole } from "../roles.js";
 import { cx, dateTime, initials, relTime, SOURCE_LABEL } from "../util.js";
 import { canPromoteTicketToKb, createTicketKbDraft } from "./ticketKbPromotion.js";
+import { canEditTicket, initialTicketEdit, saveTicketEdit, submitTicketEdit, ticketEditReducer } from "./ticketEditHelpers.js";
+import { noSuggestionText, storedSummary, summaryButtonLabel, summaryFrom, summaryNote } from "./aiAssistHelpers.js";
+import { onField } from "./formHelpers.js";
 import { mergeEarlierInteractions } from "./phase3Helpers.js";
 import { inFlightGuard, normalizeInteractions, runTicketTransition, teamEmployees } from "./workflowHelpers.js";
 import { decisionErrorMessage, isStaleDecision, requesterApprovalStatus, submitApprovalDecision } from "./approvalHelpers.js";
@@ -83,6 +87,10 @@ export default function TicketDetail({ id, onChanged, onBack }) {
     catch (e) { setError(`Couldn't update ${Object.keys(body).join(", ").replace(/_/g, " ")}: ${e.message}`); }
   };
 
+  // Subject and description edit (own tickets for customers, any visible ticket for staff). Errors stay in the editor.
+  const [editing, setEditing] = useState(false);
+  const closeEditor = () => { setError(""); setEditing(false); };
+
   // One transition at a time. A failed conversation refresh after a successful transition is
   // reported as such, never as a failed transition.
   const runTransition = async (tr, extra = {}) => {
@@ -146,7 +154,14 @@ export default function TicketDetail({ id, onChanged, onBack }) {
           <span>opened {relTime(t.created_at)}</span>
           {t.is_major_incident && <span className="chip major">Major incident</span>}
         </div>
-        <h1 className="tk-title">{t.subject}</h1>
+        {editing ? (
+          <TicketEditor t={t} onCancel={() => setEditing(false)} onSave={(body) => saveTicketEdit({ api, id, body, changed, done: closeEditor })} />
+        ) : (
+          <div className="row" style={{ alignItems: "baseline" }}>
+            <h1 className="tk-title">{t.subject}</h1>
+            {canEditTicket(user, t) && <button type="button" className="btn ghost sm" onClick={() => setEditing(true)}>Edit</button>}
+          </div>
+        )}
         <div className="row">
           <StateChip state={t.state} />
           <PriorityMark p={t.priority} />
@@ -776,11 +791,39 @@ function DuplicateCallout({ t, onMerged }) {
   );
 }
 
+/** Edits the subject and description in place. `onSave` resolves to an error message, or "" when saved. Its logic is
+ * in ticketEditHelpers.js. */
+function TicketEditor({ t, onCancel, onSave }) {
+  const [state, dispatch] = useReducer(ticketEditReducer, t, initialTicketEdit);
+  return (
+    <form className="stack" noValidate aria-label="Edit ticket"
+      onSubmit={(event) => submitTicketEdit({ event, ticket: t, state, dispatch, save: onSave, close: onCancel })}>
+      <label className="field"><span>Summary</span>
+        <input className="input" value={state.subject} maxLength={300} onChange={onField(dispatch, "subject")} aria-invalid={!!state.error} />
+      </label>
+      <label className="field"><span>Details</span>
+        <textarea className="input" rows={6} value={state.description} onChange={onField(dispatch, "description")} />
+      </label>
+      {state.error && <div className="error" role="alert">{state.error}</div>}
+      <div className="row">
+        <button className="btn primary sm" disabled={state.busy}>{state.busy ? "Saving..." : "Save"}</button>
+        <button type="button" className="btn ghost sm" onClick={onCancel} disabled={state.busy}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+TicketEditor.propTypes = {
+  t: PropTypes.shape({ subject: PropTypes.string, description: PropTypes.string }).isRequired,
+  onCancel: PropTypes.func.isRequired,
+  onSave: PropTypes.func.isRequired,
+};
+
 function AiAssist({ t, onApplied }) {
   const { meta } = useApp();
   const [similar, setSimilar] = useState(null);
   const [kb, setKb] = useState([]);
-  const [summary, setSummary] = useState(t.ai?.summary || "");
+  const [summary, setSummary] = useState(storedSummary(t)); // { text, method }: see aiAssistHelpers.js
   const [busy, setBusy] = useState("");
   const triage = t.ai?.triage || {};
 
@@ -791,7 +834,7 @@ function AiAssist({ t, onApplied }) {
 
   const summarize = async () => {
     setBusy("summary");
-    try { setSummary((await api(`/tickets/${t.id}/ai_summary/`, { method: "POST" })).summary); } finally { setBusy(""); }
+    try { setSummary(summaryFrom(await api(`/tickets/${t.id}/ai_summary/`, { method: "POST" }))); } finally { setBusy(""); }
   };
   const apply = async () => {
     setBusy("apply");
@@ -811,10 +854,17 @@ function AiAssist({ t, onApplied }) {
       <div className="card-b stack" style={{ gap: 12 }}>
         <div>
           <div className="row"><h3>Summary</h3><span className="spacer" />
-            <button className="btn ghost sm" onClick={summarize} disabled={busy === "summary"}>{busy === "summary" ? "Summarising..." : summary ? "Refresh" : "Summarise"}</button>
+            <button className="btn ghost sm" onClick={summarize} disabled={busy === "summary"}>{summaryButtonLabel({ busy, summary })}</button>
           </div>
-          {summary && <p className="small" style={{ whiteSpace: "pre-wrap", margin: "6px 0 0" }}>{summary}</p>}
+          {summary.text && <p className="small" style={{ whiteSpace: "pre-wrap", margin: "6px 0 0" }}>{summary.text}</p>}
+          {summaryNote(summary) && <p className="small muted" style={{ margin: "4px 0 0" }}>{summaryNote(summary)}</p>}
         </div>
+        {sugg.length === 0 && (
+          <div>
+            <h3>Suggested triage</h3>
+            <p className="small muted" style={{ margin: "6px 0 0" }}>{noSuggestionText(triage)}</p>
+          </div>
+        )}
         {sugg.length > 0 && (
           <div>
             <div className="row"><h3>Suggested triage</h3><span className="spacer" />
@@ -848,6 +898,12 @@ function AiAssist({ t, onApplied }) {
     </section>
   );
 }
+
+AiAssist.propTypes = {
+  t: PropTypes.shape({ id: PropTypes.number.isRequired, ai: PropTypes.object, category: PropTypes.object, team: PropTypes.object,
+    impact: PropTypes.number, urgency: PropTypes.number }).isRequired,
+  onApplied: PropTypes.func.isRequired,
+};
 
 function KbSuggestions({ id }) {
   const [kb, setKb] = useState([]);

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { useApp } from "../App.jsx";
-import { fileProblems, limitsFrom, uploadErrorMessage } from "./attachmentHelpers.js";
+import { fileProblems, limitsFrom } from "./attachmentHelpers.js";
+import { createErrors, otherErrors, raiseTicket, submitLabel, ticketProblems } from "./newTicketHelpers.js";
 
 export default function NewTicket() {
   const { user, meta, navigate, refreshCounts } = useApp();
@@ -32,39 +33,19 @@ export default function NewTicket() {
 
   const submit = async (e) => {
     e.preventDefault();
-    const errs = {};
-    if (!f.subject.trim()) errs.subject = "Add a short summary of the problem or request.";
-    (type?.custom_fields || []).forEach((d) => { if (d.required && !custom[d.key]) errs[d.key] = `${d.label} is required.`; });
-    setErrors(errs);
-    if (Object.keys(errs).length || fileErrors.length) return;
+    const problems = ticketProblems(f, type, custom);
+    setErrors(problems);
+    if (Object.keys(problems).length || fileErrors.length) return;
     setBusy(true);
-    const body = { ticket_type: type.id, subject: f.subject.trim(), description: f.description, custom_fields: custom,
-      source: window.matchMedia("(max-width: 820px)").matches ? "mobile" : "portal" };
-    for (const k of ["account", "ci", "category", "impact", "urgency", "team"]) if (f[k]) body[k] = Number(f[k]);
     try {
-      const t = await api("/tickets/", { method: "POST", body });
-      if (files.length) {
-        const form = new FormData();
-        files.forEach((x) => form.append("files", x));
-        // The ticket exists by now, so a refused upload is reported here instead of being dropped silently.
-        let problem = "";
-        try {
-          const r = await api(`/tickets/${t.id}/attachments/`, { method: "POST", form });
-          if (r?.errors?.length) problem = r.errors.join("; ");
-        } catch (upErr) {
-          problem = uploadErrorMessage(upErr, limits);
-        }
-        if (problem) {
-          refreshCounts();
-          setUploadIssue({ ticket: t, message: problem });
-          setBusy(false);
-          return;
-        }
-      }
+      const mobile = globalThis.matchMedia("(max-width: 820px)").matches;
+      const { ticket, uploadProblem } = await raiseTicket(api, { form: f, type, custom, mobile, files, limits });
       refreshCounts();
-      navigate(`/tickets/${t.id}`);
-    } catch (err) {
-      setErrors(err.data && typeof err.data === "object" ? Object.fromEntries(Object.entries(err.data).map(([k, v]) => [k, [].concat(v).join(" ")])) : { form: err.message });
+      // The ticket exists by now, so a refused upload is reported here instead of being dropped silently.
+      if (uploadProblem) setUploadIssue({ ticket, message: uploadProblem }); else navigate(`/tickets/${ticket.id}`);
+    } catch (error_) {
+      setErrors(createErrors(error_));
+    } finally {
       setBusy(false);
     }
   };
@@ -169,10 +150,10 @@ export default function NewTicket() {
             <span className="hint">Up to {limits.max_file_mb} MB per file.</span>
             {fileErrors.map((m) => <span key={m} className="error" role="alert">{m}</span>)}
           </label>
-          {Object.entries(errors).filter(([k]) => !["subject", ...(type?.custom_fields || []).map((d) => d.key)].includes(k)).map(([k, v]) => (
+          {otherErrors(errors, type).map(([k, v]) => (
             <div key={k} className="error">{v}</div>
           ))}
-          <div className="row"><button className="btn primary" disabled={busy || fileErrors.length > 0}>{busy ? "Submitting..." : user.is_agent ? "Create ticket" : "Submit request"}</button>
+          <div className="row"><button className="btn primary" disabled={busy || fileErrors.length > 0}>{submitLabel({ busy, isAgent: user.is_agent })}</button>
             <button type="button" className="btn ghost" onClick={() => history.back()}>Cancel</button></div>
         </form>
 

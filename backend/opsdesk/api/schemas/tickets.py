@@ -194,6 +194,7 @@ class TicketCountsResponse(BaseModel):
     unassigned: Optional[int] = None
     sla: Optional[int] = None
     major: Optional[int] = None
+    company: Optional[int] = None  # customers: open tickets of their account raised by someone else
     open: int
 
 
@@ -282,6 +283,7 @@ class CSATSurveyResponse(BaseModel):
     subject: str
     score: Optional[int] = None
     responded: bool = False
+    has_comment: bool = False  # written feedback was already given (it is accepted once; the stars can change)
 
 
 class CSATSubmitRequest(BaseModel):

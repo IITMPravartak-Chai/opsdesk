@@ -132,6 +132,44 @@ class TestMfa:
         monkeypatch.setattr(mailer, "send_mail", working)
         assert login_with_code(api, world, emailed_codes)
 
+    def test_a_code_store_outage_at_sign_in_fails_closed_with_503(self, api, world, emailed_codes, monkeypatch):
+        from opsdesk.security import email_otp
+        enable_two_step(api, world, emailed_codes)
+
+        def down(*a, **kw):
+            raise email_otp.StoreUnavailable()
+        monkeypatch.setattr(email_otp, "verify", down)
+        r = post_login(api, world.email("employee"), World.PASSWORD, otp="123456")
+        assert r.status_code == 503 and "access" not in r.json() and "temporarily unavailable" in r.json()["detail"]
+
+    def test_turning_two_step_on_reports_a_mail_failure_and_a_store_outage(self, api, world, monkeypatch):
+        from opsdesk.security import email_otp
+        from opsdesk.services import mailer
+        h = login(api, world, "team_lead")
+
+        def broken(*a, **kw):
+            raise OSError("mail server down")
+        monkeypatch.setattr(mailer, "send_mail", broken)
+        r = api.post("/api/auth/mfa/", headers=h, json={})
+        assert r.status_code == 503 and "couldn't send the code" in r.json()["detail"]
+        assert api.get("/api/auth/me/", headers=h).json()["mfa_enabled"] is False
+
+        def down(*a, **kw):
+            raise email_otp.StoreUnavailable()
+        monkeypatch.setattr(email_otp, "send", down)
+        r = api.post("/api/auth/mfa/", headers=h, json={})
+        assert r.status_code == 503 and "can't be checked" in r.json()["detail"]
+
+    def test_turning_two_step_on_for_an_account_that_no_longer_exists_is_refused(self, world):
+        from fastapi import HTTPException
+        from opsdesk.api.routers import auth as auth_router
+        from opsdesk.api.security import AuthenticatedUser
+        gone = AuthenticatedUser(10 ** 9, world.tenant_id, "employee")
+        with tenant_session(world.tenant_id) as s:
+            with pytest.raises(HTTPException) as caught:
+                auth_router._switch_two_step(s, gone, None, True)
+        assert caught.value.status_code == 400 and "isn't available" in caught.value.detail
+
     def test_wrong_code_is_refused_and_turning_on_twice_is_blocked(self, api, world, emailed_codes):
         h = login(api, world, "team_lead")
         api.post("/api/auth/mfa/", headers=h, json={})

@@ -44,13 +44,16 @@ def _handle(method: str, token: str, payload: Optional[CSATSubmitRequest]) -> CS
         if method == "POST":
             if not payload or not (1 <= payload.score <= 5):
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a rating from 1 to 5.")
+            # The star rating may be changed later from the same link; written feedback is accepted once and kept.
             survey.score = payload.score
-            survey.comment = (payload.comment or "")[:2000]
+            if not (survey.comment or "").strip():
+                survey.comment = (payload.comment or "").strip()[:2000]
             survey.responded_at = utcnow()
             s.flush()
             services.log_event(s, survey.ticket, "csat", None, score=payload.score)
         return CSATSurveyResponse(ticket=survey.ticket.number, subject=survey.ticket.subject, score=survey.score,
-                                  responded=survey.responded_at is not None)
+                                  responded=survey.responded_at is not None,
+                                  has_comment=bool((survey.comment or "").strip()))
 
 
 @router.get("/api/csat/{token}/", response_model=CSATSurveyResponse)

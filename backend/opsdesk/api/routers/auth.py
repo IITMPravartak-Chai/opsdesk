@@ -73,6 +73,38 @@ def authenticate(email: str, password: str):
     return row
 
 
+def _send_login_code(throttle, row) -> JSONResponse:
+    """Email a sign-in code (or say that one is already on its way) and ask the person to enter it."""
+    sent = email_otp.send(get_redis_client(), settings.jwt_secret_key, email_otp.LOGIN, row.user_id, row.email)
+    throttle.challenged()  # correct password; the code is the next step, not a failed attempt
+    masked = email_otp.mask_email(row.email)
+    detail = (f"We emailed a 6-digit code to {masked}. Enter it to finish signing in." if sent else
+              f"A code was already sent to {masked}. Check your inbox, or wait a minute and ask for a new one.")
+    return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
+        "detail": detail, "mfa_required": True, "otp_sent": True})
+
+
+def _second_step(throttle, row, payload: LoginRequest) -> Optional[JSONResponse]:
+    """The emailed-code step for an account with two-step sign-in on (security/email_otp.py). None means the code was
+    right and sign-in carries on; otherwise the response to send back. The body carries "mfa_required"; the sign-in form
+    only shows its code field when it sees that flag."""
+    code = str(payload.otp or "").strip()
+    try:
+        if not code:
+            return _send_login_code(throttle, row)
+        if not email_otp.verify(get_redis_client(), settings.jwt_secret_key, email_otp.LOGIN, row.user_id, code):
+            return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
+                "detail": "That code didn't match or has expired. Check the newest email, or send a new code.",
+                "mfa_required": True})
+    except email_otp.DeliveryFailed:
+        throttle.challenged()
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={
+            "detail": email_otp.NOT_SENT, "mfa_required": True})
+    except email_otp.StoreUnavailable:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": login_throttle.UNAVAILABLE})
+    return None
+
+
 def _login(payload: LoginRequest, request: Request):
     login_clean = (payload.email or payload.username or "").strip().lower()
     throttle = login_throttle.LoginThrottle(
@@ -91,28 +123,9 @@ def _login(payload: LoginRequest, request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=BAD_LOGIN)
 
     if row.mfa_enabled:
-        # Second step: a one-time code emailed to the account's own address (security/email_otp.py). The body carries
-        # "mfa_required"; the sign-in form only shows its code field when it sees that flag.
-        code = str(payload.otp or "").strip()
-        try:
-            if not code:
-                sent = email_otp.send(get_redis_client(), settings.jwt_secret_key, email_otp.LOGIN, row.user_id, row.email)
-                throttle.challenged()  # correct password; the code is the next step, not a failed attempt
-                masked = email_otp.mask_email(row.email)
-                detail = (f"We emailed a 6-digit code to {masked}. Enter it to finish signing in." if sent else
-                          f"A code was already sent to {masked}. Check your inbox, or wait a minute and ask for a new one.")
-                return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
-                    "detail": detail, "mfa_required": True, "otp_sent": True})
-            if not email_otp.verify(get_redis_client(), settings.jwt_secret_key, email_otp.LOGIN, row.user_id, code):
-                return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={
-                    "detail": "That code didn't match or has expired. Check the newest email, or send a new code.",
-                    "mfa_required": True})
-        except email_otp.DeliveryFailed:
-            throttle.challenged()
-            return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={
-                "detail": email_otp.NOT_SENT, "mfa_required": True})
-        except email_otp.StoreUnavailable:
-            return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": login_throttle.UNAVAILABLE})
+        stopped = _second_step(throttle, row, payload)
+        if stopped is not None:
+            return stopped
 
     throttle.succeeded()
     refresh, _claims = tokens.issue_refresh(row.user_id, row.tenant_id, row.role)

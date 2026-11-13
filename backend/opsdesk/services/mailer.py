@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
-from email.utils import formataddr, parseaddr
+from datetime import datetime, timezone
+from email.utils import format_datetime, formataddr, make_msgid, parseaddr
 
 from ..settings import settings
 
@@ -22,6 +23,13 @@ def build_message(subject: str, body: str, recipients: list[str], *, from_email:
         msg["Reply-To"] = reply_to
     for k, v in (headers or {}).items():
         msg[k] = v
+    # Every message needs a Date and a Message-ID (RFC 5322). smtplib adds neither, and receivers such as
+    # Outlook / Microsoft 365 junk or refuse mail without them. The id uses the sender's own domain.
+    if "Date" not in msg:
+        msg["Date"] = format_datetime(datetime.now(timezone.utc))  # "... +0000"
+    if "Message-ID" not in msg:
+        domain = parseaddr(msg["From"])[1].rpartition("@")[2]
+        msg["Message-ID"] = make_msgid(domain=domain or None)
     msg.set_content(body)
     if html:
         msg.add_alternative(html, subtype="html")

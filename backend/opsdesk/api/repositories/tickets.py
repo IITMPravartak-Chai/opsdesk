@@ -236,6 +236,9 @@ class TicketRepository:
         if filters.get("mine") == "1":
             where_clauses.append("t.requester_id = %(filter_mine_id)s")
             params["filter_mine_id"] = user.user_id
+        elif filters.get("mine") == "0":  # visible tickets raised by someone else (a customer's "Company tickets")
+            where_clauses.append("t.requester_id IS DISTINCT FROM %(filter_mine_id)s")
+            params["filter_mine_id"] = user.user_id
 
         if filters.get("open") == "1":
             where_clauses.append("s.category NOT IN ('resolved', 'closed', 'cancelled')")
@@ -335,8 +338,10 @@ class TicketRepository:
 
         async with conn.cursor(row_factory=dict_row) as cur:
             if not user.is_agent:
+                params["requester_user_id"] = user.user_id
                 query = f"""
-                    SELECT COUNT(*) AS total_open
+                    SELECT COUNT(*) AS total_open,
+                           COUNT(*) FILTER (WHERE t.requester_id = %(requester_user_id)s) AS mine
                     FROM tickets_ticket t
                     JOIN workflow_state s ON s.id = t.state_id
                     WHERE {visibility_where}
@@ -344,7 +349,8 @@ class TicketRepository:
                 """
                 await cur.execute(query, params)
                 row = await cur.fetchone()
-                return TicketCountsResponse(open=row["total_open"] if row else 0)
+                total, mine = (row["total_open"], row["mine"]) if row else (0, 0)
+                return TicketCountsResponse(open=total, mine=mine, company=total - mine)
 
             params["agent_user_id"] = user.user_id
             query = f"""

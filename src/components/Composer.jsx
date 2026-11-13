@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
+import PropTypes from "prop-types";
 import { api } from "../api.js";
 import { useApp } from "../App.jsx";
 import SafeMarkdown from "./SafeMarkdown.js";
 import { cx } from "../util.js";
 import { inFlightGuard } from "../pages/workflowHelpers.js";
-import { fileProblems, limitsFrom, uploadErrorMessage } from "../pages/attachmentHelpers.js";
+import { fileProblems, limitsFrom, pickFiles, uploadErrorMessage } from "../pages/attachmentHelpers.js";
+import { draftFrom, draftNote, recordDraftUse } from "../pages/aiAssistHelpers.js";
 
 export default function Composer({ t, onSent }) {
   const { user, meta } = useApp();
@@ -16,6 +18,8 @@ export default function Composer({ t, onSent }) {
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
+  // The AI draft now in the box, if any. It counts as "accepted" only when the reply is actually sent (see send()).
+  const [aiDraft, setAiDraft] = useState(null);
   const limits = limitsFrom(meta);
   const fileErrors = fileProblems(files, limits);
   const textareaRef = useRef(null);
@@ -47,10 +51,7 @@ export default function Composer({ t, onSent }) {
       const r = await api(`/tickets/${t.id}/ai_draft/`, { method: "POST" });
       setBody(r.draft);
       setKind("public");
-      api("/ai/feedback/", {
-        method: "POST",
-        body: { ticket_id: t.id, feature: "draft", accepted: true, suggestion: { sources: r.sources } },
-      }).catch(() => {});
+      setAiDraft(draftFrom(r));
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -81,10 +82,7 @@ export default function Composer({ t, onSent }) {
       setErr("Write a message or attach a file.");
       return;
     }
-    if (fileErrors.length) {
-      setErr(fileErrors.join(" "));
-      return;
-    }
+    if (fileErrors.length) { setErr(fileErrors.join(" ")); return; }
     if (!sendGuard.current.enter()) return;
     setBusy("send");
     setErr("");
@@ -94,6 +92,8 @@ export default function Composer({ t, onSent }) {
     files.forEach((f) => form.append("files", f));
     try {
       const r = await api(`/tickets/${t.id}/interactions/`, { method: "POST", form });
+      recordDraftUse(api, t.id, aiDraft, { kind, body });
+      setAiDraft(null);
       if (r.attachment_errors?.length) setErr(r.attachment_errors.join("; "));
       setBody("");
       setFiles([]);
@@ -235,6 +235,7 @@ export default function Composer({ t, onSent }) {
         </div>
       )}
 
+      {draftNote(aiDraft) && <div className="small muted" style={{ padding: "4px 12px" }} role="note">{draftNote(aiDraft)}</div>}
       <div className="composer-bar">
         {user.is_agent && (
           <div className="seg" role="group" aria-label="Message type">
@@ -295,12 +296,7 @@ export default function Composer({ t, onSent }) {
           type="file"
           multiple
           hidden
-          onChange={(e) => {
-            const picked = [...e.target.files];
-            setFiles(picked);
-            setErr(fileProblems(picked, limits).join(" "));
-            e.target.value = ""; // so the same file can be picked again after it was removed
-          }}
+          onChange={(e) => pickFiles(e.target, { setFiles, setError: setErr, limits })}
         />
 
         <span className="spacer" />
@@ -331,3 +327,8 @@ export default function Composer({ t, onSent }) {
     </div>
   );
 }
+
+Composer.propTypes = {
+  t: PropTypes.shape({ id: PropTypes.number.isRequired }).isRequired,
+  onSent: PropTypes.func,
+};

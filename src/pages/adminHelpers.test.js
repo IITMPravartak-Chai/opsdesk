@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import {
   buildUserQuery, canManageSla, canManageTeams, canManageUsers, checkSchedule, checkTargets, formatMinutes, ifMatch,
   impactLines, loadError, parseSkills, roleLabel, scheduleRows, settingsHome, settingsRoute, settingsTabs, toSchedule,
-  toTargets, userChanges, userDraft, writeError,
+  toTargets, userChanges, userDraft, writeError, moveUserToTeam, userTeamChange,
 } from "./adminHelpers.js";
 
 const src = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
@@ -166,4 +166,73 @@ test("newUserPayload trims and lowercases; newUserProblem names what is missing"
   const pw = generatePassword();
   assert.equal(pw.length, 16);
   assert.match(pw, /^[A-Za-z0-9]+$/);
+});
+
+// ---- the team picker on the user editor
+
+const employee = (teams = [{ id: 3 }]) => ({ id: 21, role: "employee", teams, permissions: { editable_fields: ["first_name", "role"] } });
+
+test("the team picker counts as changed only when a different team was actually chosen", () => {
+  const u = employee();
+  assert.deepEqual(userTeamChange(u, { role: "employee" }, null), { currentTeamId: 3, teamEditable: true, teamChanged: false }, "untouched");
+  assert.equal(userTeamChange(u, { role: "employee" }, "3").teamChanged, false, "the same team again");
+  assert.equal(userTeamChange(u, { role: "employee" }, "5").teamChanged, true);
+  assert.equal(userTeamChange(u, { role: "employee" }, "").teamChanged, true, "choosing no team");
+  assert.deepEqual(userTeamChange(employee([]), { role: "employee" }, ""), { currentTeamId: "", teamEditable: true, teamChanged: false });
+});
+
+test("only an employee who stays an employee, and whom the caller may edit, can be moved", () => {
+  const u = employee();
+  assert.equal(userTeamChange(u, { role: "team_lead" }, "5").teamChanged, false, "being promoted in the same save");
+  assert.equal(userTeamChange({ ...u, role: "customer" }, { role: "customer" }, "5").teamEditable, false);
+  assert.equal(userTeamChange({ ...u, permissions: { editable_fields: [] } }, { role: "employee" }, "5").teamEditable, false, "read-only user");
+});
+
+/** A fake API over two teams that records every write. */
+function teamsApi(teams) {
+  const writes = [];
+  const api = async (path, options = {}) => {
+    const id = Number(path.match(/\/admin\/teams\/(\d+)\//)[1]);
+    if (!options.method) return teams[id];
+    writes.push({ path, method: options.method, ids: options.body.user_ids, headers: options.headers });
+    return {};
+  };
+  return { api, writes };
+}
+
+test("moving an employee takes them out of the old team, then adds them to the new one, each with its version", async () => {
+  const { api, writes } = teamsApi({
+    3: { version: "a1", members: [{ id: 20 }, { id: 21 }] },
+    5: { version: "b2", members: [{ id: 30 }] },
+  });
+  await moveUserToTeam(api, employee(), "5");
+  assert.deepEqual(writes, [
+    { path: "/admin/teams/3/members/", method: "PUT", ids: [20], headers: { "If-Match": '"a1"' } },
+    { path: "/admin/teams/5/members/", method: "PUT", ids: [30, 21], headers: { "If-Match": '"b2"' } },
+  ]);
+});
+
+test("choosing no team only removes; staying in the chosen team is not removed first", async () => {
+  const removed = teamsApi({ 3: { version: "a1", members: [{ id: 21 }] } });
+  await moveUserToTeam(removed.api, employee(), "");
+  assert.deepEqual(removed.writes.map((w) => [w.path, w.ids]), [["/admin/teams/3/members/", []]]);
+
+  const two = teamsApi({ 3: { version: "a1", members: [{ id: 21 }] }, 5: { version: "b2", members: [{ id: 21 }, { id: 30 }] } });
+  await moveUserToTeam(two.api, employee([{ id: 3 }, { id: 5 }]), 5);
+  assert.deepEqual(two.writes.map((w) => [w.path, w.ids]), [["/admin/teams/3/members/", []], ["/admin/teams/5/members/", [30, 21]]],
+    "they leave team 3 and are kept, once, in team 5");
+});
+
+test("a refused membership change stops the move and surfaces the error", async () => {
+  const api = async (path, options = {}) => {
+    if (!options.method) return { version: "a1", members: [{ id: 21 }] };
+    throw Object.assign(new Error("changed by someone else"), { status: 412 });
+  };
+  await assert.rejects(() => moveUserToTeam(api, employee(), "5"), /changed by someone else/);
+});
+
+test("the user editor uses the team helpers", () => {
+  const page = src("./Users.jsx");
+  assert.match(page, /const \{ currentTeamId, teamEditable, teamChanged \} = userTeamChange\(u, draft, teamId\);/);
+  assert.match(page, /if \(teamChanged\) await moveUserToTeam\(api, u, teamId\);/);
 });

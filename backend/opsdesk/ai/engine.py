@@ -212,17 +212,18 @@ def _thread(session: Session, ticket, include_internal=True, limit=30):
     return redact(text) if settings.ai_redact_pii else text
 
 
-def summarize(session: Session, ticket):
+def summarize_with_method(session: Session, ticket):
+    """(text, method): method is "ai" when the language model wrote it, "template" for the built-in fallback."""
     try:
         return complete("You summarise IT support tickets for the next agent picking them up. Be concise and factual.",
                         f"{_thread(session, ticket)[:12000]}\n\nWrite: 1) the problem in one sentence, 2) what has been "
-                        "tried, 3) current status and the next step. Max 90 words.", 300).strip()
+                        "tried, 3) current status and the next step. Max 90 words.", 300).strip(), "ai"
     except LLMUnavailable:
         last = next(iter(_interactions(session, ticket, kinds=["public", "internal"], limit=1)), None)
         count = session.scalar(select(func.count()).select_from(Interaction).where(Interaction.ticket_id == ticket.id))
         first = (ticket.description or ticket.subject).strip().split("\n")[0][:240]
         return (f"Problem: {first}\nStatus: {ticket.state.name}, priority {ticket.priority.key if ticket.priority else '-'}"
-                f", {count} updates." + (f"\nLatest: {last.body[:240]}" if last else ""))
+                f", {count} updates." + (f"\nLatest: {last.body[:240]}" if last else "")), "template"
 
 
 def draft_reply(session: Session, ticket, user=None):
@@ -236,7 +237,8 @@ def draft_reply(session: Session, ticket, user=None):
             "You draft replies for IT support agents. Polite, specific, no promises you can't keep. Plain text.",
             f"{_thread(session, ticket, include_internal=False)[:8000]}\n\nRelevant knowledge:\n{redact(context)[:4000]}\n\n"
             f"Draft the agent's next reply to the customer (greet them as {name}). Max 140 words.", 400)
-        return {"draft": text.strip(), "sources": [a["title"] for a in kb] + [p["number"] for p in past]}
+        return {"draft": text.strip(), "sources": [a["title"] for a in kb] + [p["number"] for p in past],
+                    "method": "ai"}
     except LLMUnavailable:
         if past and past[0]["resolution_notes"]:
             body = (f"Hi {name},\n\nThanks for the details. This looks similar to an issue we resolved before "
@@ -248,7 +250,8 @@ def draft_reply(session: Session, ticket, user=None):
         else:
             body = (f"Hi {name},\n\nThanks for reporting this. We're looking into it and will update you shortly. "
                     "Could you share any error messages or screenshots and when it started?\n\nBest regards")
-        return {"draft": body, "sources": [p["number"] for p in past[:1]] or [a["title"] for a in kb[:1]]}
+        return {"draft": body, "sources": [p["number"] for p in past[:1]] or [a["title"] for a in kb[:1]],
+                "method": "template"}
 
 
 def generate_article_draft(session: Session, ticket):

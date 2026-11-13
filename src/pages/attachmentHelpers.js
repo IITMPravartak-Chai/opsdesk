@@ -8,7 +8,7 @@ const MB = 1024 * 1024;
 /** Used when the server's meta response carries no limits (an older API). */
 export const DEFAULT_LIMITS = { max_file_mb: 20, max_request_mb: 25, blocked_extensions: [] };
 
-export const limitsFrom = (meta) => ({ ...DEFAULT_LIMITS, ...(meta?.attachment_limits || {}) });
+export const limitsFrom = (meta) => ({ ...DEFAULT_LIMITS, ...meta?.attachment_limits });
 
 export function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
@@ -46,4 +46,15 @@ export function uploadErrorMessage(err, limits = DEFAULT_LIMITS) {
   const detail = err?.message || "";
   if (!detail || /<\/?[a-z][^>]*>/i.test(detail)) return "The files could not be uploaded.";
   return detail;
+}
+
+/**
+ * Take the files just chosen in a file input: remember them, say what is wrong with them (nothing, if they are fine)
+ * and clear the input so the same file can be chosen again after it was removed.
+ */
+export function pickFiles(input, { setFiles, setError, limits }) {
+  const picked = [...input.files];
+  setFiles(picked);
+  setError(fileProblems(picked, limits).join(" "));
+  input.value = "";
 }

@@ -13,7 +13,10 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
-RUN useradd --create-home --uid 10001 --user-group opsdesk && mkdir -p /app/media && chown -R opsdesk /app && chmod +x /app/entrypoint.sh /app/healthcheck.sh
+RUN useradd --create-home --uid 10001 --user-group opsdesk \
+ && mkdir -p /app/media \
+ && chown -R opsdesk /app \
+ && chmod +x /app/entrypoint.sh /app/healthcheck.sh
 USER 10001:10001
 
 EXPOSE 8001
