@@ -60,7 +60,7 @@ export default function Login() {
               <input className="input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={otp} onChange={(e) => setOtp(e.target.value)} autoFocus />
             </label>
           )}
-          {info && <div className="notice" role="status">{info}</div>}
+          {info && <output className="notice">{info}</output>}
           {error && <div className="error" role="alert">{error}</div>}
           <button className="btn primary" disabled={busy}>{busy ? "Signing in..." : "Sign in"}</button>
           {needOtp && <button type="button" className="btn ghost" onClick={resend} disabled={busy}>Send a new code</button>}

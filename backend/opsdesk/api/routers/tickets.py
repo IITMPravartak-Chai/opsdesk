@@ -79,6 +79,15 @@ def _customer_editable_fields(s, values, ticket_type_id):
     return {k: v for k, v in (values or {}).items() if k in allowed}
 
 
+def _check_customer_may_edit(ticket, actor) -> None:
+    """A customer edits only a ticket they raised themselves, and only while it is open: a colleague's ticket (visible
+    through the company account) and a closed one are read-only."""
+    if ticket.requester_id != actor.id:
+        raise _bad("You can only edit tickets you raised.", status.HTTP_403_FORBIDDEN)
+    if ticket.state.is_final:
+        raise _bad("This ticket is closed. Raise a new one and reference it.")
+
+
 # Related fields a staff update may set: model, and whether null (clear) is allowed.
 _UPDATE_REFS = {
     "account": (Account, True), "category": (Category, True), "service": (Service, True),
@@ -364,6 +373,7 @@ async def update_ticket(payload: TicketUpdateRequest, request: Request, id: int 
         if actor.is_agent:
             _resolve_update_refs(s, update_data, ticket, user.tenant_id)
         else:
+            _check_customer_may_edit(ticket, actor)
             # Requesters may only edit CUSTOMER_EDITABLE fields; drop the rest unresolved, so a requester cannot
             # probe which ids exist.
             update_data = {k: v for k, v in update_data.items() if k in services.CUSTOMER_EDITABLE}
@@ -483,7 +493,8 @@ async def upload_ticket_attachments(request: Request, id: int = Path(..., ge=1),
             except AttachmentRejected as exc:
                 errors.append(f"{f.filename}: {exc}")
         if not out:
-            raise _bad("No valid files uploaded.")
+            # Say why: "report.pdf: File exceeds 20 MB" tells the person what to change; a bare refusal does not.
+            raise _bad("; ".join(errors) if errors else "No files were uploaded.")
         return out, errors
 
     out, errors = await run_in_tenant(user, _upload)

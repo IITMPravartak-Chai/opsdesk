@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
+import PropTypes from "prop-types";
 import { api } from "../api.js";
 import { useApp } from "../App.jsx";
 import Modal from "../components/Modal.jsx";
 import { STAFF_ROLES, STRATEGY_LABELS, canManageTeams, ifMatch, loadError, roleLabel, settingsRoute, writeError } from "./adminHelpers.js";
 import { BackLink, ConfirmDialog, PageState, SettingsNav, WriteResult } from "./AdminCommon.jsx";
+import { emptyTeamForm, saveLabel, saveTeam, teamToForm } from "./teamHelpers.js";
 
 const FORBIDDEN = "Team management is available to managers and team leads only.";
 const USAGE_LABELS = {
@@ -103,7 +105,7 @@ function TeamList() {
 /** One modal for both creating and editing a team's details, including its team lead and manager. */
 function TeamFormModal({ team, onClose, onSaved }) {
   const editing = !!team;
-  const [form, setForm] = useState({ name: "", email: "", assignment_strategy: "manual", team_lead_id: null, manager_id: null });
+  const [form, setForm] = useState(emptyTeamForm());
   const [detail, setDetail] = useState(null);
   const [options, setOptions] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -113,10 +115,7 @@ function TeamFormModal({ team, onClose, onSaved }) {
   useEffect(() => { api("/admin/user-options/").then(setOptions).catch(() => setOptions({ team_leads: [], team_managers: [] })); }, []);
   useEffect(() => {
     if (!editing) return;
-    api(`/admin/teams/${team.id}/`).then((d) => {
-      setDetail(d);
-      setForm({ name: d.name, email: d.email || "", assignment_strategy: d.assignment_strategy, team_lead_id: d.team_lead?.id ?? null, manager_id: d.manager?.id ?? null });
-    }).catch((err) => setError(writeError(err, "team")));
+    api(`/admin/teams/${team.id}/`).then((d) => { setDetail(d); setForm(teamToForm(d)); }).catch((error_) => setError(writeError(error_, "team")));
   }, [editing, team?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async (e) => {
@@ -125,21 +124,9 @@ function TeamFormModal({ team, onClose, onSaved }) {
     setBusy(true);
     setError("");
     try {
-      let t;
-      if (editing) {
-        const body = {};
-        if (form.name.trim() !== detail.name) body.name = form.name.trim();
-        if (form.email !== (detail.email || "")) body.email = form.email;
-        if (form.assignment_strategy !== detail.assignment_strategy) body.assignment_strategy = form.assignment_strategy;
-        if (form.team_lead_id !== (detail.team_lead?.id ?? null)) body.team_lead_id = form.team_lead_id;
-        if (form.manager_id !== (detail.manager?.id ?? null)) body.manager_id = form.manager_id;
-        t = Object.keys(body).length ? await api(`/admin/teams/${team.id}/`, { method: "PATCH", body, headers: ifMatch(detail.version) }) : detail;
-      } else {
-        t = await api("/admin/teams/", { method: "POST", body: { ...form, name: form.name.trim() } });
-      }
-      onSaved(t);
-    } catch (err) {
-      setError(writeError(err, "team"));
+      onSaved(await saveTeam(api, { team, form, saved: detail }));
+    } catch (error_) {
+      setError(writeError(error_, "team"));
       setBusy(false);
     }
   };
@@ -149,7 +136,7 @@ function TeamFormModal({ team, onClose, onSaved }) {
       <>
         <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
         <button type="submit" form="team-form" className="btn primary" disabled={busy || loading || (editing && !detail)}>
-          {busy ? "Saving…" : editing ? "Save changes" : "Create team"}</button>
+          {saveLabel({ busy, editing })}</button>
       </>
     )}>
       <form id="team-form" className="stack" onSubmit={submit}>
@@ -169,6 +156,12 @@ function TeamFormModal({ team, onClose, onSaved }) {
     </Modal>
   );
 }
+
+TeamFormModal.propTypes = {
+  team: PropTypes.shape({ id: PropTypes.number.isRequired }), // absent when creating
+  onClose: PropTypes.func.isRequired,
+  onSaved: PropTypes.func.isRequired,
+};
 
 function TeamDetail({ id }) {
   const { navigate } = useApp();

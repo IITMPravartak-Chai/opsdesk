@@ -5,7 +5,7 @@ import { isTopRole } from "../roles.js";
 import { lastPage, rangeLabel } from "./auditLogHelpers.js";
 import {
   ASSIGNABLE_ROLES, ROLE_OPTIONS, buildUserQuery, isSuperAdmin, canManageUsers, ifMatch, loadError, parseSkills, roleLabel, settingsRoute, userChanges,
-  generatePassword, newUserPayload, newUserProblem, userDraft, writeError,
+  generatePassword, moveUserToTeam, newUserPayload, newUserProblem, userDraft, userTeamChange, writeError,
 } from "./adminHelpers.js";
 import Modal from "../components/Modal.jsx";
 import { BackLink, ConfirmDialog, PageState, SettingsNav, WriteResult } from "./AdminCommon.jsx";
@@ -236,9 +236,7 @@ function UserDetail({ id }) {
   const can = (f) => perms.editable_fields.includes(f);
   const current = { ...draft, skills: parseSkills(skillsText) };
   const changes = userChanges(userDraft(u), current, perms.editable_fields);
-  const currentTeamId = u.teams[0]?.id ?? "";
-  const teamEditable = u.role === "employee" && draft.role === "employee" && perms.editable_fields.length > 0;
-  const teamChanged = teamEditable && teamId !== null && String(teamId) !== String(currentTeamId);
+  const { currentTeamId, teamEditable, teamChanged } = userTeamChange(u, draft, teamId);
   const dirty = Object.keys(changes).length > 0 || teamChanged;
   const set = (k, fn = (e) => e.target.value) => (e) => setDraft((d) => ({ ...d, [k]: fn(e) }));
   const idOrNull = (e) => (e.target.value ? Number(e.target.value) : null);
@@ -254,17 +252,7 @@ function UserDetail({ id }) {
     setBusy(true);
     setResult(null);
     try {
-      if (teamChanged) {
-        // Membership is stored on the team: take the employee out of their current team(s), then add them to the chosen one.
-        const setMember = async (tid, present) => {
-          const t = await api(`/admin/teams/${tid}/`);
-          const ids = t.members.map((m) => m.id).filter((x) => x !== u.id);
-          if (present) ids.push(u.id);
-          await api(`/admin/teams/${tid}/members/`, { method: "PUT", body: { user_ids: ids }, headers: ifMatch(t.version) });
-        };
-        for (const t of u.teams) if (String(t.id) !== String(teamId)) await setMember(t.id, false);
-        if (teamId !== "") await setMember(teamId, true);
-      }
+      if (teamChanged) await moveUserToTeam(api, u, teamId); // membership is stored on the team (see adminHelpers.js)
       const data = Object.keys(changes).length
         ? await api(`/admin/users/${id}/`, { method: "PATCH", body: changes, headers: ifMatch(u.version) })
         : await api(`/admin/users/${id}/`);

@@ -12,6 +12,17 @@ def comment(api, h, tid, body, **extra):
     return api.post(f"/api/tickets/{tid}/interactions/", headers=h, files=parts)
 
 
+def add_colleague(world):
+    """A second customer on the same company account (visible to each other, owner of their own tickets)."""
+    from opsdesk.db.models import User
+    from opsdesk.security.passwords import make_password
+    from tests.conftest import World
+    email = f"colleague-{world.slug}@tests.example"
+    with tenant_session(world.tenant_id) as s:
+        s.add(User(email=email, username=email, tenant_id=world.tenant_id, role="customer", first_name="Col",
+                   last_name="League", password=make_password(World.PASSWORD), account_id=world.account_id))
+    world.emails["colleague"] = email
+
 class TestCreate:
     def test_customer_ticket_gets_requester_account_priority_and_sla(self, api, world, auth):
         t = create_ticket_api(api, auth("customer"), "VPN keeps dropping")
@@ -140,6 +151,18 @@ class TestListing:
         counts = api.get("/api/tickets/counts/", headers=h).json()
         assert counts["mine"] == 1 and counts["unassigned"] == 1 and counts["open"] == 2
 
+    def test_customer_lists_split_into_my_tickets_and_company_tickets(self, api, world, auth):
+        from tests.conftest import login
+        add_colleague(world)
+        h = auth("customer")
+        create_ticket_api(api, h, "My own one")
+        create_ticket_api(api, login(api, world, "colleague"), "A colleague one")
+        names = lambda q: sorted(x["subject"] for x in api.get(f"/api/tickets/?open=1&{q}", headers=h).json()["results"])
+        assert names("mine=1") == ["My own one"] and names("mine=0") == ["A colleague one"]
+        assert names("") == ["A colleague one", "My own one"]
+        counts = api.get("/api/tickets/counts/", headers=h).json()
+        assert (counts["mine"], counts["company"], counts["open"]) == (1, 1, 2)
+
 
 class TestUpdate:
     def test_agent_updates_fields_and_references(self, api, world, auth):
@@ -177,6 +200,29 @@ class TestUpdate:
         t = create_ticket_api(api, h, "Mine")
         r = api.patch(f"/api/tickets/{t['id']}/", headers=h, json={"subject": "Better title", "assignee": 10 ** 9, "impact": 1})
         assert r.status_code == 200 and r.json()["subject"] == "Better title" and r.json()["impact"] == 3
+
+    def test_customer_edits_subject_and_description_of_their_own_open_ticket(self, api, auth):
+        h = auth("customer")
+        t = create_ticket_api(api, h, "Original subject", description="Original details")
+        r = api.patch(f"/api/tickets/{t['id']}/", headers=h, json={"subject": "New subject", "description": "New details"})
+        assert r.status_code == 200 and r.json()["subject"] == "New subject" and r.json()["description"] == "New details"
+        again = api.get(f"/api/tickets/{t['id']}/", headers=h).json()
+        assert (again["subject"], again["description"]) == ("New subject", "New details")
+
+    def test_customer_cannot_edit_a_colleagues_ticket_or_a_closed_one(self, api, world, auth):
+        """A colleague's ticket is visible through the company account but is read-only; so is a closed ticket."""
+        from tests.conftest import login
+        add_colleague(world)
+        theirs = create_ticket_api(api, login(api, world, "colleague"), "Colleague ticket")
+        mine = auth("customer")
+        assert api.get(f"/api/tickets/{theirs['id']}/", headers=mine).status_code == 200  # visible...
+        r = api.patch(f"/api/tickets/{theirs['id']}/", headers=mine, json={"subject": "hijacked"})
+        assert r.status_code == 403 and "raised" in r.json()["detail"]  # ...but not editable
+        assert api.get(f"/api/tickets/{theirs['id']}/", headers=auth("manager")).json()["subject"] == "Colleague ticket"
+        own = create_ticket_api(api, mine, "Will be closed")
+        cancel = next(x for x in api.get(f"/api/tickets/{own['id']}/", headers=auth("manager")).json()["transitions"] if x["name"] == "Cancel")
+        api.post(f"/api/tickets/{own['id']}/transition/", headers=auth("manager"), json={"transition_id": cancel["id"], "comment": "dup"})
+        assert api.patch(f"/api/tickets/{own['id']}/", headers=mine, json={"subject": "late edit"}).status_code == 400
 
     def test_customer_cannot_edit_someone_elses_ticket(self, api, world, auth):
         t = create_ticket_api(api, auth("employee"), "Not theirs")
@@ -280,6 +326,14 @@ class TestAttachments:
         assert r.status_code == 400
         monkeypatch.setattr(settings, "attachment_max_mb", 0)
         assert self.upload(api, h, t["id"], "big.txt", b"x").status_code == 400
+
+    def test_a_refused_upload_says_why(self, api, auth, monkeypatch):
+        from opsdesk.settings import settings
+        h = auth("employee")
+        t = create_ticket_api(api, h, "x")
+        assert self.upload(api, h, t["id"], "run.exe", b"MZ").json()["detail"] == "run.exe: Files of type .exe are not allowed"
+        monkeypatch.setattr(settings, "attachment_max_mb", 0)
+        assert "big.txt: File exceeds 0 MB" in self.upload(api, h, t["id"], "big.txt", b"x").json()["detail"]
 
     def test_path_traversal_in_filename_is_neutralised(self, api, auth):
         h = auth("employee")

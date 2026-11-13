@@ -217,3 +217,31 @@ export function generatePassword(random = (n) => crypto.getRandomValues(new Uint
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
   return Array.from(random(16), (n) => chars[n % chars.length]).join("");
 }
+
+// ---- the team picker on the user editor
+
+/**
+ * The user's current team, whether the picker may change it, and whether it was changed. `teamId` is null while the
+ * picker is untouched and "" for "no team". Only employees are placed in a team this way.
+ */
+export function userTeamChange(user, draft, teamId) {
+  const currentTeamId = user.teams[0]?.id ?? "";
+  const teamEditable = user.role === "employee" && draft.role === "employee" && user.permissions.editable_fields.length > 0;
+  const teamChanged = teamEditable && teamId !== null && String(teamId) !== String(currentTeamId);
+  return { currentTeamId, teamEditable, teamChanged };
+}
+
+/**
+ * Membership is stored on the team: take the employee out of their current team(s), then add them to the chosen one
+ * ("" = no team). Each team goes back with its version, so a concurrent change is refused instead of overwritten.
+ */
+export async function moveUserToTeam(api, user, teamId) {
+  const setMember = async (id, present) => {
+    const team = await api(`/admin/teams/${id}/`);
+    const ids = team.members.map((m) => m.id).filter((x) => x !== user.id);
+    if (present) ids.push(user.id);
+    await api(`/admin/teams/${id}/members/`, { method: "PUT", body: { user_ids: ids }, headers: ifMatch(team.version) });
+  };
+  for (const team of user.teams) if (String(team.id) !== String(teamId)) await setMember(team.id, false);
+  if (teamId !== "") await setMember(teamId, true);
+}

@@ -145,13 +145,21 @@ class TestAi:
         other = create_ticket_api(api, ha, "Agent only ticket")
         assert api.get(f"/api/tickets/{other['id']}/kb_suggestions/", headers=hc).status_code == 404
 
-    def test_summary_draft_triage_and_apply(self, api, world, auth):
+    def test_summary_draft_triage_and_apply(self, api, world, auth, monkeypatch):
         h = auth("employee")
         t = create_ticket_api(api, h, "Disk almost full on build server", description="df shows 98 percent")
         s = api.post(f"/api/tickets/{t['id']}/ai_summary/", headers=h).json()["summary"]
         assert "Disk almost full" in s or "df shows" in s
         d = api.post(f"/api/tickets/{t['id']}/ai_draft/", headers=h).json()
         assert d["draft"].startswith("Hi") and isinstance(d["sources"], list)
+        assert d["method"] == "template"  # no language model is configured in tests: the UI says so
+        assert api.post(f"/api/tickets/{t['id']}/ai_summary/", headers=h).json()["method"] == "template"
+        from opsdesk.ai import engine
+        monkeypatch.setattr(engine, "complete", lambda system, prompt, max_tokens=800: "  Hi there, restart the agent.  ")
+        written = api.post(f"/api/tickets/{t['id']}/ai_draft/", headers=h).json()
+        assert written["method"] == "ai" and written["draft"] == "Hi there, restart the agent."
+        summary = api.post(f"/api/tickets/{t['id']}/ai_summary/", headers=h).json()
+        assert summary["method"] == "ai" and summary["summary"] == "Hi there, restart the agent."
         tr = api.post(f"/api/tickets/{t['id']}/ai_triage/", headers=h).json()
         assert "possible_duplicates" in tr
         with tenant_session(world.tenant_id) as s2:
@@ -449,13 +457,32 @@ class TestCsat:
         resolve(api, auth("employee"), t)
         tok = self.survey_token(world, t["id"])
         info = api.get(f"/api/csat/{tok}/").json()
-        assert info == {"ticket": t["number"], "subject": "Rate me", "score": None, "responded": False}
+        assert info == {"ticket": t["number"], "subject": "Rate me", "score": None, "responded": False, "has_comment": False}
         assert api.post(f"/api/csat/{tok}/", json={"score": 0}).status_code in (400, 422)
         assert api.post(f"/api/csat/{tok}/", json={"score": 6}).status_code in (400, 422)
         done = api.post(f"/api/csat/{tok}/", json={"score": 5, "comment": "great"})
         assert done.json()["responded"] is True and done.json()["score"] == 5
         assert api.get(f"/api/tickets/csat/{tok}/status/").json()["score"] == 5
         assert api.get("/api/reports/overview/", headers=auth("employee")).json()["csat_avg"] == 5.0
+
+    def test_stars_can_be_changed_but_written_feedback_is_taken_once(self, api, world, auth):
+        t = assign_to_employee(api, world, auth, create_ticket_api(api, auth("customer"), "Rate me twice"))
+        resolve(api, auth("employee"), t)
+        tok = self.survey_token(world, t["id"])
+        first = api.post(f"/api/csat/{tok}/", json={"score": 2, "comment": "  slow  "}).json()
+        assert first["score"] == 2 and first["has_comment"] is True
+        again = api.post(f"/api/csat/{tok}/", json={"score": 5, "comment": "actually fine now"}).json()
+        assert again["score"] == 5 and again["has_comment"] is True  # the stars changed, the first feedback stayed
+        with tenant_session(world.tenant_id) as s:
+            assert s.scalars(select(CSATSurvey.comment).where(CSATSurvey.ticket_id == t["id"])).one() == "slow"
+        assert api.get("/api/reports/overview/", headers=auth("employee")).json()["csat_avg"] == 5.0  # one survey, latest stars
+
+    def test_feedback_can_still_be_given_once_after_a_stars_only_rating(self, api, world, auth):
+        t = assign_to_employee(api, world, auth, create_ticket_api(api, auth("customer"), "Stars first"))
+        resolve(api, auth("employee"), t)
+        tok = self.survey_token(world, t["id"])
+        assert api.post(f"/api/csat/{tok}/", json={"score": 4}).json()["has_comment"] is False
+        assert api.post(f"/api/csat/{tok}/", json={"score": 4, "comment": "thanks"}).json()["has_comment"] is True
 
     def test_unknown_or_short_tokens_are_404_and_nothing_leaks(self, api):
         assert api.get("/api/csat/" + "z" * 40 + "/").status_code == 404

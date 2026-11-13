@@ -59,8 +59,11 @@ export const AGENT_VIEWS = [
   { key: "open", label: "All open", params: { open: 1, ordering: "updated" } },
   { key: "done", label: "Resolved and closed", params: { state_category: "resolved,closed,cancelled", ordering: "updated" } },
 ];
+// "My tickets" are the ones the customer raised; "Company tickets" are the other tickets of their account that they
+// may see (colleagues' and watched ones). The keys match the counts GET /api/tickets/counts/ returns to a customer.
 export const CUSTOMER_VIEWS = [
-  { key: "open", label: "Open requests", params: { open: 1, ordering: "updated" } },
+  { key: "mine", label: "My tickets", params: { mine: 1, open: 1, ordering: "updated" } },
+  { key: "company", label: "Company tickets", params: { mine: 0, open: 1, ordering: "updated" } },
   { key: "done", label: "Resolved", params: { state_category: "resolved,closed,cancelled", ordering: "updated" } },
 ];
 

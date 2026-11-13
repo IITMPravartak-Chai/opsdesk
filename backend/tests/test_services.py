@@ -320,6 +320,19 @@ class TestAutomation:
             svc.update_ticket(s, t, s.get(User, world.users["employee"]), {"subject": "again"})  # must terminate
             assert t.subject == "again"
 
+    def test_an_internal_note_is_never_emailed_to_the_requester(self, world, session_for, monkeypatch):
+        from opsdesk.services import notifications
+        sent = []
+        monkeypatch.setattr(notifications, "send", lambda *a, **kw: sent.append(a))
+        with session_for() as s:
+            t = _new(s, world)
+            note = Interaction(tenant_id=world.tenant_id, ticket_id=t.id, kind="internal", direction="internal", body="secret")
+            reply = Interaction(tenant_id=world.tenant_id, ticket_id=t.id, kind="public", direction="outbound", body="hello")
+            notifications.notify_portal_reply(s, t, note)
+            assert sent == []
+            notifications.notify_portal_reply(s, t, reply)
+            assert len(sent) == 1 and sent[0][1] == [world.email("customer")]
+
     def test_notify_and_webhook_actions_queue_work(self, world, session_for, monkeypatch):
         sent = []
         monkeypatch.setattr(tasks.send_email, "delay", lambda to, subject, body: sent.append((to, subject, body)))

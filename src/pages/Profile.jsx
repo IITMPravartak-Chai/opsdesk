@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { api, logout, updateUser } from "../api.js";
 import { useApp } from "../App.jsx";
-import { isSixDigitCode, mfaErrorMessage } from "./profileHelpers.js";
+import { isSixDigitCode, mfaErrorMessage, twoStepButtonLabel } from "./profileHelpers.js";
 
 export default function Profile() {
   const { user } = useApp();
@@ -67,7 +67,7 @@ export default function Profile() {
                 : "Each time you sign in, we email a 6-digit code to your address."}
             </p>
             <button className="btn" style={{ justifySelf: "start" }} onClick={start} disabled={busy !== ""}>
-              {busy === "start" ? "Sending code…" : turnOn ? "Turn on two-step sign-in" : "Turn off two-step sign-in"}
+              {twoStepButtonLabel({ busy, turnOn })}
             </button>
           </>
         )}

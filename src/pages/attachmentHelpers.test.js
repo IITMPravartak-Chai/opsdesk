@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { DEFAULT_LIMITS, fileProblems, formatSize, limitsFrom, uploadErrorMessage } from "./attachmentHelpers.js";
+import { DEFAULT_LIMITS, fileProblems, formatSize, limitsFrom, pickFiles, uploadErrorMessage } from "./attachmentHelpers.js";
 
 const MB = 1024 * 1024;
 const src = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
@@ -51,4 +51,27 @@ test("the new-ticket form and the reply composer check files and do not swallow 
   for (const code of [form, composer]) assert.match(code, /fileProblems\(/);
   assert.doesNotMatch(form, /attachments\/`, \{ method: "POST", form \}\)\.catch\(\(\) => \{\}\)/);
   assert.match(form, /disabled=\{busy \|\| fileErrors\.length > 0\}/);
+});
+
+test("choosing files remembers them, reports what is wrong and frees the input for the same file again", () => {
+  const seen = {};
+  const handlers = { setFiles: (files) => { seen.files = files; }, setError: (text) => { seen.error = text; }, limits };
+  const input = { files: [{ name: "report.pdf", size: 50 * MB }, { name: "note.txt", size: 10 }], value: "C:\\fakepath\\report.pdf" };
+  pickFiles(input, handlers);
+  assert.deepEqual(seen.files.map((f) => f.name), ["report.pdf", "note.txt"]);
+  assert.match(seen.error, /report\.pdf is 50 MB\. The largest file you can attach is 20 MB\./);
+  assert.equal(input.value, "", "the input is cleared so the same file can be chosen again after it was removed");
+  pickFiles({ files: [{ name: "note.txt", size: 10 }], value: "x" }, handlers);
+  assert.equal(seen.error, "", "acceptable files leave no message behind");
+});
+
+test("odd file names and sizes are handled", () => {
+  assert.deepEqual(fileProblems([{ name: "README", size: 10 }, { name: ".env", size: 10 }, { size: 10 }], limits), [], "no extension is not a blocked type");
+  assert.deepEqual(fileProblems([{ name: "a.pdf" }, { name: "b.pdf" }], limits), [], "a missing size counts as nothing");
+  assert.equal(formatSize(-1), "");
+  assert.equal(formatSize(Number.NaN), "");
+  assert.equal(formatSize(12 * MB), "12 MB");
+  assert.equal(uploadErrorMessage(undefined), "The files could not be uploaded.");
+  assert.deepEqual(limitsFrom(undefined), DEFAULT_LIMITS);
+  assert.deepEqual(fileProblems([{ name: "run.EXE", size: 1 }], { max_file_mb: 20, max_request_mb: 25 }), [], "no blocked list means nothing is blocked by type");
 });

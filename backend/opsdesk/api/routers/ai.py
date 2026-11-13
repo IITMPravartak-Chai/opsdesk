@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import or_, select
 
-from ...ai.engine import (detect_duplicates, draft_reply, similar_articles, similar_tickets, summarize, ticket_text,
+from ...ai.engine import (detect_duplicates, draft_reply, similar_articles, similar_tickets, summarize_with_method,ticket_text,
                           triage)
 from ...db.models import AIFeedback, Category, KnowledgeArticle, Team, Ticket, User
 from ...db.session import tenant_session
@@ -116,9 +116,9 @@ def ticket_ai_summary(id: int = Path(..., ge=1), user: AuthenticatedUser = Depen
     _staff(user, "request AI summaries")
     with tenant_session(user.tenant_id) as s:
         ticket = _ticket(s, id, user.tenant_id)
-        text = summarize(s, ticket)
+        text, method = summarize_with_method(s, ticket)
         ticket.ai_summary = text
-        return {"summary": text}
+        return {"summary": text, "method": method}
 
 
 @router.post("/api/tickets/{id}/ai_draft/")
